@@ -1,9 +1,12 @@
 import torch
+import cutlass
+import cutlass.cute as cute
 from cutlass.cute.runtime import from_dlpack
 import cutlass.torch as cutlass_torch
 
 def make_tensor(m, n, dtype):
     shape = (m, n)
+    A = torch.empty(*shape, dtype=torch.int32).random_(-2, 2).to(dtype=dtype, device="cpu")
     return (
         torch.empty(*shape, dtype=torch.int32)
         .random_(-2, 2)
@@ -12,6 +15,7 @@ def make_tensor(m, n, dtype):
 
 @cute.jit
 def kernel_tiling_examples(gmem_tsr: cute.Tensor):
+    cute.printf("================== Tensor Tiling Examples ==================")
     ###################################################
     #################### GMEM Tiling ##################
     ###################################################
@@ -73,7 +77,21 @@ def kernel_tiling_examples(gmem_tsr: cute.Tensor):
     tv_lane0 = tv_tsr.layout(tidx)
     cute.printf(">?? Value Index for lane 0 all warps: {}", tv_lane0)
 
-m, n = 512, 512
+    cute.printf("============================================================")
+
+@cute.jit
+def layout_tiling_examples():
+    cute.printf("================== Layout Tiling Examples ==================")
+    mnk_tiler= (128, 128, 16)
+    tensor_shape = (512, 512, 512)
+    grid_shape = cute.ceil_div(tensor_shape, mnk_tiler[:2])
+    cute.printf(">?? MNK Tiler: {}", mnk_tiler)
+    cute.printf(">?? Sliced MNK Tiler: {}", mnk_tiler[:2])
+    cute.printf(">?? Tensor Shape: {}", tensor_shape)
+    cute.printf(">?? Grid Shape for Tiling: {}", grid_shape)
+    cute.printf("============================================================")
+
+m, n, k = 512, 512, 512
 dtype = cutlass_torch.dtype(cutlass.Int32)
 gmem_torch = make_tensor(m, n, dtype)
 gmem_tensor = (
@@ -81,3 +99,23 @@ gmem_tensor = (
     .mark_layout_dynamic(leading_dim=1)
 )
 kernel_tiling_examples(gmem_tensor)
+layout_tiling_examples()
+
+@cute.jit
+def useful_functions():
+    '''
+    cute.select()
+    cute.group_modes()
+    cute.prepend()
+    cute.append()
+    cute.slice_()
+    cute.flatten()
+    cute.filter()
+    cute.crd2idx()
+    cute.idx2crd()
+    cute.slice_and_offset()
+    cute.recast_ptr()
+    cute.recast_layout()
+    cute.flatten()
+    '''
+    pass
