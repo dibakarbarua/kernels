@@ -9,6 +9,20 @@ from cutlass.cute.nvgpu import cpasync, tcgen05
 import cutlass.utils.blackwell_helpers as sm100_utils
 from cutlass.cute.runtime import from_dlpack
 
+### Tiling Setup ###
+io_dtype = cutlass.Float16
+acc_dtype = cutlass.Float32
+mma_inst_shape_mnk = (128, 256, 16)
+mma_tiler_mnk = (128, 256, 64)
+threads_per_cta = 128
+
+# Pipeline stage configuration
+ab_stages = 4
+acc_stage = 1
+
+### Tensors Setup ###
+m, n, k = 512, 1024, 512
+
 #####################################
 ############ Host Function ##########
 #####################################
@@ -119,6 +133,21 @@ def host_function(
         mma_tiler_mnk,
         tiled_mma,
     )
+    cute.printf("\n\n\n")
+    cute.printf("M={}, N={}, K={}", m, n, k)
+    cute.printf("CTA Tile: {}", mma_tiler_mnk)
+    cute.printf("Number of stages for A/B: {},", ab_stages)
+    cute.printf("Number of stages for Acc: {}", acc_stage)
+    cute.printf("MMA Inst Shape: {}", mma_inst_shape_mnk)
+    cute.printf("SMEM Layouts for A and B created")
+    cute.printf("a_smem_layout: {}", a_smem_layout)
+    cute.printf("b_smem_layout: {}", b_smem_layout)
+    cute.printf("a_smem_layout_one_stage: {}", a_smem_layout_one_stage)
+    cute.printf("b_smem_layout_one_stage: {}", b_smem_layout_one_stage)
+    cute.printf("TMA Descriptors created")
+    # cute.printf("a_tma_atom: {}, b_tma_atom: {}", a_tma_atom, b_tma_atom)
+    cute.printf("a_tma_tensor: {}", a_tma_tensor)
+    cute.printf("b_tma_tensor: {}", b_tma_tensor)
 
     # Launch the kernel
     # NOTE: ceil_div((M, N, 1), (m_tile, n_tile))
@@ -186,6 +215,9 @@ def kernel(
         byte_alignment=128,
         swizzle=b_smem_layout.inner,
     )
+    if (mma_coord_mnk == (0, 0, None)) and (tidx == 0):
+        cute.printf("SMEM Tensor sA: {}", sA.layout)
+        cute.printf("SMEM Tensor sB: {}", sB.layout)
 
     # Allocate all TMEM columns
     tmem_alloc_barrier = pipeline.NamedBarrier(
@@ -231,6 +263,23 @@ def kernel(
     gB = cute.local_tile(mB_nkl, mma_tiler_mnk, mma_coord_mnk, proj=(None, 1, 1))
     # (bM, bN)
     gC = cute.local_tile(mC_mnl, mma_tiler_mnk, mma_coord_mnk, proj=(1, 1, None))
+    
+    if (mma_coord_mnk == (0, 0, None)) and (tidx == 0):
+        cute.printf("gA (from a_tma_tensor): {}", gA.layout)
+        cute.printf("gB: (from b_tma_tensor) {}", gB.layout)
+        cute.printf("gC (from c tensor): {}", gC.layout)
+    
+    #### What is a TiledMMA ####
+    # 1. Tiled MMA captures how many MMA instructions are required
+    # ... to cover the CTA tile given the MMA instruction used.
+    # 2. We can specifiy an Atom Layout on how we want the Op to cover the tile
+    # ... in case multiple concurrent MMA targets (thread hierarchies)
+    # tiled_mma = cute.make_tiled_mma(op, atom_layout_mnk=(number of concurrent ops))
+    # In this case the concurrent ops are issued by different threadgroups (warp,wg,CTA)
+    # Let N = number of concurrent ops/threadgroups
+    # thr_mma = tiled_mma.get_slice(i) for i < N gives 
+    # ... us a one of those threadgroups' MMA op.
+    
     thr_mma = tiled_mma.get_slice(0)
     # (MMA, MMA_M, MMA_K)
     tCgA = thr_mma.partition_A(gA)
@@ -250,7 +299,7 @@ def kernel(
     tAsA, tAgA = cute.nvgpu.cpasync.tma_partition(
         tma_atom_a,
         0,
-        cute.make_layout(1),
+        cute.make_layout(1), # number of TMA atoms per tile
         cute.group_modes(sA, 0, 3),
         cute.group_modes(tCgA, 0, 3),
     )
@@ -261,6 +310,19 @@ def kernel(
         cute.group_modes(sB, 0, 3),
         cute.group_modes(tCgB, 0, 3),
     )
+
+    if (mma_coord_mnk == (0, 0, None)) and (tidx == 0):
+        cute.printf("tCgA (from tiled_mma partition): {}", tCgA.layout)
+        cute.printf("tCgB: (from tiled_mma partition) {}", tCgB.layout)
+        cute.printf("tCgC: (from tiled_mma partition) {}", tCgC.layout)
+        cute.printf("tCrA: (from tiled_mma fragment) {}", tCrA.layout)
+        cute.printf("tCrB: (from tiled_mma fragment) {}", tCrB.layout)
+        cute.printf("acc_shape: (from tiled_mma partition) {}", acc_shape)
+        cute.printf("tCtAcc: (from tiled_mma fragment) {}", tCtAcc.layout)
+        cute.printf("tAsA: (from TMA partition) {}", tAsA.layout)
+        cute.printf("tAgA: (from TMA partition) {}", tAgA.layout)
+        cute.printf("tBsB: (from TMA partition) {}", tBsB.layout)
+        cute.printf("tBgB: (from TMA partition) {}", tBgB.layout)
 
     # CTA-wide sync before retrieving the pointer to the start of the allocated TMEM
     # Only warp 0 does the allocation so we need to sync before retrieving the TMEM start address
@@ -307,6 +369,8 @@ def kernel(
         for k_tile_idx in cutlass.range(num_k_tiles):
             # Issue TMA loads
             ab_empty = ab_producer.acquire_and_advance()
+            if (tidx == 0):
+                cute.printf("TMAIter> CTA:({},{}), Loop: idx = {}, ab_empty.count={}, ab_empty.index={}", bidx, bidy, k_tile_idx, ab_empty.count, ab_empty.index)
             cute.copy(
                 tma_atom_a,
                 tAgA[(None, ab_empty.count)],
@@ -325,6 +389,8 @@ def kernel(
             num_k_blocks = cute.size(tCrA, mode=[2])
             for k_block_idx in cutlass.range_constexpr(num_k_blocks):
                 k_block_coord = (None, None, k_block_idx, ab_full.index)
+                if (tidx == 0):
+                    cute.printf("MMAIter> CTA:({},{}), Loop: idx = {}, kidx = {}, k_block_coord = {}, ab_full.index={}", bidx, bidy, k_tile_idx, k_block_idx, k_block_coord, ab_full.index)
                 cute.gemm(
                     tiled_mma,
                     tCtAcc,
@@ -366,20 +432,6 @@ def kernel(
 ############### SETUP ###############
 #####################################
 
-### Tiling Setup ###
-io_dtype = cutlass.Float16
-acc_dtype = cutlass.Float32
-mma_inst_shape_mnk = (128, 256, 16)
-mma_tiler_mnk = (128, 256, 64)
-threads_per_cta = 128
-
-# Pipeline stage configuration
-ab_stages = 4
-acc_stage = 1
-
-### Tensors Setup ###
-m, n, k = 512, 512, 128
-
 # Make K-major tensors (torch tensors are row-major)
 def make_tensors(mn, k, dtype):
     shape = (mn, k)
@@ -406,4 +458,4 @@ c_tensor = (
 )
 
 naive_kernel = cute.compile(host_function, a_tensor, b_tensor, c_tensor, kernel)
-naive_kernel()
+naive_kernel(a_tensor, b_tensor, c_tensor)
