@@ -184,14 +184,15 @@ __device__ __forceinline__ void cp_async_gmem_to_smem(void* smem_ptr,
     static_assert(Bytes == 4 || Bytes == 8 || Bytes == 16,
                   "cp.async only supports 4B, 8B, and 16B transactions.");
 
-#if defined(__CUDA_ARCH__) && (__CUDA_ARCH__ >= 800)
+#if defined(__CUDA_ARCH__) && (__CUDA_ARCH__ >= 800) && (Bytes == 16)
     uint32_t const smem_addr = cast_smem_ptr_to_uint(smem_ptr);
     asm volatile("cp.async.cg.shared.global [%0], [%1], %2;\n"
                  :
                  : "r"(smem_addr), "l"(gmem_ptr), "n"(Bytes));
 #else
-    (void)smem_ptr;
-    (void)gmem_ptr;
+    using AccessType = cute::array_aligned<uint8_t, Bytes, Bytes>;
+    *reinterpret_cast<AccessType*>(smem_ptr) =
+        *reinterpret_cast<AccessType const*>(gmem_ptr);
 #endif
 }
 
@@ -202,16 +203,23 @@ __device__ __forceinline__ void cp_async_gmem_to_smem_zfill(
     static_assert(Bytes == 4 || Bytes == 8 || Bytes == 16,
                   "cp.async only supports 4B, 8B, and 16B transactions.");
 
-#if defined(__CUDA_ARCH__) && (__CUDA_ARCH__ >= 800)
+#if defined(__CUDA_ARCH__) && (__CUDA_ARCH__ >= 800) && (Bytes == 16)
     uint32_t const smem_addr = cast_smem_ptr_to_uint(smem_ptr);
     int const valid_bytes = pred_guard ? Bytes : 0;
     asm volatile("cp.async.cg.shared.global [%0], [%1], %2, %3;\n"
                  :
                  : "r"(smem_addr), "l"(gmem_ptr), "n"(Bytes), "r"(valid_bytes));
 #else
-    (void)smem_ptr;
-    (void)gmem_ptr;
-    (void)pred_guard;
+    using AccessType = cute::array_aligned<uint8_t, Bytes, Bytes>;
+    if (pred_guard)
+    {
+        *reinterpret_cast<AccessType*>(smem_ptr) =
+            *reinterpret_cast<AccessType const*>(gmem_ptr);
+    }
+    else
+    {
+        *reinterpret_cast<AccessType*>(smem_ptr) = AccessType{};
+    }
 #endif
 }
 
@@ -235,6 +243,111 @@ __device__ __forceinline__ void cp_async_wait_all()
 #if defined(__CUDA_ARCH__) && (__CUDA_ARCH__ >= 800)
     asm volatile("cp.async.wait_all;\n" : :);
 #endif
+}
+
+template <typename T>
+__device__ __forceinline__ T load_from_scratch(void const* scratch_ptr,
+                                               uint32_t scratch_offset_bytes)
+{
+    return *reinterpret_cast<T const*>(
+        reinterpret_cast<char const*>(scratch_ptr) + scratch_offset_bytes);
+}
+
+template <typename T>
+__device__ __forceinline__ void store_to_global(T* gmem_ptr,
+                                                uint32_t gmem_offset_elements,
+                                                T value,
+                                                bool pred_guard)
+{
+    if (pred_guard)
+    {
+        gmem_ptr[gmem_offset_elements] = value;
+    }
+}
+
+template <typename T, uint32_t SwizzleB, uint32_t SwizzleM, uint32_t SwizzleS>
+__device__ __forceinline__ void load_transposed_stage_to_smem(
+    T const* input,
+    void* smem_stage_base,
+    uint32_t tile_start_x,
+    uint32_t tile_start_y,
+    uint32_t lane_idx,
+    uint32_t warp_idx,
+    uint32_t stage_idx,
+    uint32_t rows,
+    uint32_t cols,
+    uint32_t rows_per_tile,
+    uint32_t cols_per_tile,
+    uint32_t rows_per_warp,
+    uint32_t rows_per_stage)
+{
+    for (uint32_t row_in_stage = 0; row_in_stage < rows_per_stage; ++row_in_stage)
+    {
+        uint32_t const warp_row_base = warp_idx * rows_per_warp;
+        uint32_t const warp_stage_row = stage_idx * rows_per_stage + row_in_stage;
+        uint32_t const gmem_load_y = tile_start_y + warp_row_base + warp_stage_row;
+        uint32_t const gmem_load_x = tile_start_x + lane_idx;
+        bool const gmem_load_pred = (gmem_load_y < rows) && (gmem_load_x < cols);
+
+        uint32_t const gmem_load_offset = gmem_load_y * cols + gmem_load_x;
+
+        uint32_t const smem_write_y = lane_idx;
+        uint32_t const smem_write_x = warp_row_base + warp_stage_row;
+        uint32_t const smem_write_linear_offset =
+            (smem_write_y * cols_per_tile + smem_write_x) * sizeof(T);
+        uint32_t const smem_write_offset =
+            swizzle_smem_offset<SwizzleB, SwizzleM, SwizzleS>(
+                smem_write_linear_offset);
+
+        T const* const gmem_load_ptr = gmem_load_pred ? input + gmem_load_offset : input;
+        void* const smem_write_ptr =
+            reinterpret_cast<char*>(smem_stage_base) + smem_write_offset;
+
+        cp_async_gmem_to_smem_zfill<sizeof(T)>(smem_write_ptr,
+                                               static_cast<void const*>(gmem_load_ptr),
+                                               gmem_load_pred);
+    }
+}
+
+template <typename T, uint32_t SwizzleB, uint32_t SwizzleM, uint32_t SwizzleS>
+__device__ __forceinline__ void store_transposed_stage_from_smem(
+    void const* smem_stage_base,
+    T* output,
+    uint32_t tile_start_x,
+    uint32_t tile_start_y,
+    uint32_t lane_idx,
+    uint32_t warp_idx,
+    uint32_t stage_idx,
+    uint32_t rows,
+    uint32_t cols,
+    uint32_t rows_per_tile,
+    uint32_t cols_per_tile,
+    uint32_t rows_per_warp,
+    uint32_t rows_per_stage)
+{
+    (void)rows_per_tile;
+
+    for (uint32_t row_in_stage = 0; row_in_stage < rows_per_stage; ++row_in_stage)
+    {
+        uint32_t const warp_row_base = warp_idx * rows_per_warp;
+        uint32_t const warp_stage_row = stage_idx * rows_per_stage + row_in_stage;
+        uint32_t const gmem_store_y = tile_start_x + warp_row_base + warp_stage_row;
+        uint32_t const gmem_store_x = tile_start_y + lane_idx;
+        bool const gmem_store_pred = (gmem_store_y < cols) && (gmem_store_x < rows);
+
+        uint32_t const gmem_store_offset = gmem_store_y * rows + gmem_store_x;
+
+        uint32_t const smem_read_y = warp_row_base + warp_stage_row;
+        uint32_t const smem_read_x = lane_idx;
+        uint32_t const smem_read_linear_offset =
+            (smem_read_y * cols_per_tile + smem_read_x) * sizeof(T);
+        uint32_t const smem_read_offset =
+            swizzle_smem_offset<SwizzleB, SwizzleM, SwizzleS>(
+                smem_read_linear_offset);
+
+        T const value = load_from_scratch<T>(smem_stage_base, smem_read_offset);
+        store_to_global(output, gmem_store_offset, value, gmem_store_pred);
+    }
 }
 
 template <typename T, int StagesPerWarp>
@@ -267,20 +380,97 @@ void transpose_kernel(T const* input, T* output, int rows, int cols)
 
     static_assert(Traits::kWarpsPerBlock == 4,
                   "This transpose kernel currently supports exactly 4 warps.");
+    static_assert(sizeof(T) == 4,
+                  "transpose_kernel currently supports only 4-byte element types.");
     static_assert(StagesPerWarp == 1 || StagesPerWarp == 2,
                   "transpose_kernel currently supports only 1 or 2 stages per warp.");
+    static_assert(Traits::kTileRows == 32 && Traits::kTileCols == 32,
+                  "The 4-byte transpose kernel expects a 32x32 tile.");
 
     assert((blockDim.x * blockDim.y * blockDim.z) == Traits::kThreadsPerBlock);
 
     __shared__ SharedStorage shared_storage;
 
-    uint32_t cta_tile_start_x;
-    uint32_t cta_tile_start_y;
-    uint32_t cta_tile_idx_x;
-    uint32_t cta_tile_idx_y;
+    constexpr uint32_t kSwizzleB = 5;
+    constexpr uint32_t kSwizzleM = 4;
+    constexpr uint32_t kSwizzleS = 3;
+    constexpr uint32_t kRowsPerTile = Traits::kTileRows;
+    constexpr uint32_t kColsPerTile = Traits::kTileCols;
+    constexpr uint32_t kRowsPerWarp = kRowsPerTile / Traits::kWarpsPerBlock;
+    constexpr uint32_t kRowsPerStage = kRowsPerWarp / StagesPerWarp;
+    static_assert(kRowsPerWarp == 8,
+                  "A 32-row tile with 4 warps should map to 8 rows per warp.");
+    static_assert(kRowsPerStage * StagesPerWarp == kRowsPerWarp,
+                  "StagesPerWarp must evenly divide the per-warp row allocation.");
 
+    uint32_t const cta_tile_idx_x = blockIdx.x;
+    uint32_t const cta_tile_idx_y = blockIdx.y;
+    uint32_t const cta_tile_start_x = cta_tile_idx_x * kColsPerTile;
+    uint32_t const cta_tile_start_y = cta_tile_idx_y * kRowsPerTile;
+    uint32_t const cta_tile_step_x = gridDim.x * kColsPerTile;
+    uint32_t const cta_tile_step_y = gridDim.y * kRowsPerTile;
+    uint32_t const lane_idx = threadIdx.x & (Traits::kWarpSize - 1);
+    uint32_t const warp_idx = threadIdx.x / Traits::kWarpSize;
 
-    // Kernel body intentionally left empty for now.
+    uint32_t const rows_u32 = static_cast<uint32_t>(rows);
+    uint32_t const cols_u32 = static_cast<uint32_t>(cols);
+
+    for (uint32_t tile_start_y = cta_tile_start_y; tile_start_y < rows_u32;
+         tile_start_y += cta_tile_step_y)
+    {
+        for (uint32_t tile_start_x = cta_tile_start_x; tile_start_x < cols_u32;
+             tile_start_x += cta_tile_step_x)
+        {
+            for (uint32_t stage_idx = 0; stage_idx < StagesPerWarp; ++stage_idx)
+            {
+                void* const smem_stage_base =
+                    static_cast<void*>(&shared_storage.smem[stage_idx][0][0]);
+
+                load_transposed_stage_to_smem<T, kSwizzleB, kSwizzleM, kSwizzleS>(
+                    input,
+                    smem_stage_base,
+                    tile_start_x,
+                    tile_start_y,
+                    lane_idx,
+                    warp_idx,
+                    stage_idx,
+                    rows_u32,
+                    cols_u32,
+                    kRowsPerTile,
+                    kColsPerTile,
+                    kRowsPerWarp,
+                    kRowsPerStage);
+
+                cp_async_commit_group();
+            }
+
+            cp_async_wait_all();
+            __syncthreads();
+
+            for (uint32_t stage_idx = 0; stage_idx < StagesPerWarp; ++stage_idx)
+            {
+                void const* const smem_stage_base_const =
+                    static_cast<void const*>(&shared_storage.smem[stage_idx][0][0]);
+
+                store_transposed_stage_from_smem<T, kSwizzleB, kSwizzleM, kSwizzleS>(
+                    smem_stage_base_const,
+                    output,
+                    tile_start_x,
+                    tile_start_y,
+                    lane_idx,
+                    warp_idx,
+                    stage_idx,
+                    rows_u32,
+                    cols_u32,
+                    kRowsPerTile,
+                    kColsPerTile,
+                    kRowsPerWarp,
+                    kRowsPerStage);
+            }
+
+            __syncthreads();
+        }
+    }
 }
 
 } // namespace swizzled_transpose
