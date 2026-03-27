@@ -43,6 +43,12 @@ The B-Bits in the original address (starting at MBase) will be XOR'ed with the s
 Hence, 2^(M+S) covers one SMEM row and for 2^B rows we keep swizzling addresses.
 Hence number of rows = 2^B
 For a 32x32 transpose of 4B elements, 2^B = 32 and B = 5.
+
+For our case, we can plan for 16B access per lane and multiples of 32 rows per SMEM allocation.
+Hence,
+MBase = 4
+SShift = 3
+BBits = {5 for 32 rows; 6 for 64 rows}
 */
 
 /*
@@ -134,8 +140,37 @@ struct TransposeTileTraits
     static constexpr int kTileExtent = kWarpSize * kElementsPerLaneAccess;
     static constexpr int kTileRows = kTileExtent;
     static constexpr int kTileCols = kTileExtent;
-    static constexpr int kElementsPerWarp = kTileRows * kTileCols;
+    static constexpr int kElementsPerWarp = kTileRows * kTileCols / kWarpsPerBlock;
 };
+
+template <int B, int M, int S>
+struct SharedMemorySwizzle
+{
+    static_assert(B > 0, "B must be positive.");
+    static_assert(M >= 0, "M must be non-negative.");
+    static_assert(S > 0, "S must be positive.");
+    static_assert(B < 32, "B must fit within a 32-bit offset.");
+    static_assert(M + B <= 32, "M + B must fit within a 32-bit offset.");
+    static_assert(M + S + B <= 32,
+                  "The shifted source bit range must fit within a 32-bit offset.");
+
+    static constexpr uint32_t kBitMask = (uint32_t{1} << B) - 1u;
+
+    CUTE_HOST_DEVICE static constexpr uint32_t
+    apply(uint32_t smem_offset_bytes)
+    {
+        uint32_t const shifted_bits =
+            (smem_offset_bytes >> (M + S)) & kBitMask;
+        return smem_offset_bytes ^ (shifted_bits << M);
+    }
+};
+
+template <int B, int M, int S>
+CUTE_HOST_DEVICE static constexpr uint32_t
+swizzle_smem_offset(uint32_t smem_offset_bytes)
+{
+    return SharedMemorySwizzle<B, M, S>::apply(smem_offset_bytes);
+}
 
 __device__ __forceinline__ uint32_t cast_smem_ptr_to_uint(void const* ptr)
 {
@@ -151,7 +186,7 @@ __device__ __forceinline__ void cp_async_gmem_to_smem(void* smem_ptr,
 
 #if defined(__CUDA_ARCH__) && (__CUDA_ARCH__ >= 800)
     uint32_t const smem_addr = cast_smem_ptr_to_uint(smem_ptr);
-    asm volatile("cp.async.ca.shared.global [%0], [%1], %2;\n"
+    asm volatile("cp.async.cg.shared.global [%0], [%1], %2;\n"
                  :
                  : "r"(smem_addr), "l"(gmem_ptr), "n"(Bytes));
 #else
@@ -205,8 +240,8 @@ __device__ __forceinline__ void cp_async_wait_all()
 template <typename T, int StagesPerWarp>
 struct TransposeSharedStorage
 {
-    static_assert(StagesPerWarp > 0,
-                  "StagesPerWarp must be a positive compile-time constant.");
+    static_assert(StagesPerWarp == 1 || StagesPerWarp == 2,
+                  "StagesPerWarp must currently be 1 or 2.");
 
     using Element = T;
     using Traits = TransposeTileTraits<T>;
@@ -220,7 +255,7 @@ struct TransposeSharedStorage
         kWarpsPerBlock * kStagesPerWarp * kElementsPerWarp;
 
     alignas(16) Element
-        smem[kWarpsPerBlock][kStagesPerWarp][kTileRows][kTileCols];
+        smem[kStagesPerWarp][kTileRows][kTileCols];
 };
 
 template <typename T, int StagesPerWarp>
@@ -232,16 +267,18 @@ void transpose_kernel(T const* input, T* output, int rows, int cols)
 
     static_assert(Traits::kWarpsPerBlock == 4,
                   "This transpose kernel currently supports exactly 4 warps.");
+    static_assert(StagesPerWarp == 1 || StagesPerWarp == 2,
+                  "transpose_kernel currently supports only 1 or 2 stages per warp.");
 
     assert((blockDim.x * blockDim.y * blockDim.z) == Traits::kThreadsPerBlock);
 
     __shared__ SharedStorage shared_storage;
 
-    (void)input;
-    (void)output;
-    (void)rows;
-    (void)cols;
-    (void)shared_storage;
+    uint32_t cta_tile_start_x;
+    uint32_t cta_tile_start_y;
+    uint32_t cta_tile_idx_x;
+    uint32_t cta_tile_idx_y;
+
 
     // Kernel body intentionally left empty for now.
 }
