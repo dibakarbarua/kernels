@@ -26,53 +26,53 @@
 // _ZZN18swizzled_transpose16transpose_kernelIiLi1EEEvPKT_PS1_iiE14shared_storage has been demoted
 .global .align 1 .b8 __unnamed_3[115] = {118, 111, 105, 100, 32, 115, 119, 105, 122, 122, 108, 101, 100, 95, 116, 114, 97, 110, 115, 112, 111, 115, 101, 58, 58, 116, 114, 97, 110, 115, 112, 111, 115, 101, 95, 107, 101, 114, 110, 101, 108, 40, 99, 111, 110, 115, 116, 32, 84, 32, 42, 44, 32, 84, 32, 42, 44, 32, 105, 110, 116, 44, 32, 105, 110, 116, 41, 32, 91, 119, 105, 116, 104, 32, 84, 32, 61, 32, 117, 110, 115, 105, 103, 110, 101, 100, 32, 105, 110, 116, 59, 32, 105, 110, 116, 32, 83, 116, 97, 103, 101, 115, 80, 101, 114, 87, 97, 114, 112, 32, 61, 32, 49, 93};
 // _ZZN18swizzled_transpose16transpose_kernelIjLi1EEEvPKT_PS1_iiE14shared_storage has been demoted
-.global .align 1 .b8 _ZN48_INTERNAL_7c70280d_21_swizzled_transpose_cu_main4cuda3std3__45__cpo5beginE[1];
-.global .align 1 .b8 _ZN48_INTERNAL_7c70280d_21_swizzled_transpose_cu_main4cuda3std3__45__cpo3endE[1];
-.global .align 1 .b8 _ZN48_INTERNAL_7c70280d_21_swizzled_transpose_cu_main4cuda3std3__45__cpo6cbeginE[1];
-.global .align 1 .b8 _ZN48_INTERNAL_7c70280d_21_swizzled_transpose_cu_main4cuda3std3__45__cpo4cendE[1];
-.global .align 1 .b8 _ZN48_INTERNAL_7c70280d_21_swizzled_transpose_cu_main4cuda3std3__45__cpo6rbeginE[1];
-.global .align 1 .b8 _ZN48_INTERNAL_7c70280d_21_swizzled_transpose_cu_main4cuda3std3__45__cpo4rendE[1];
-.global .align 1 .b8 _ZN48_INTERNAL_7c70280d_21_swizzled_transpose_cu_main4cuda3std3__45__cpo7crbeginE[1];
-.global .align 1 .b8 _ZN48_INTERNAL_7c70280d_21_swizzled_transpose_cu_main4cuda3std3__45__cpo5crendE[1];
-.global .align 1 .b8 _ZN48_INTERNAL_7c70280d_21_swizzled_transpose_cu_main4cuda3std3__450_GLOBAL__N__7c70280d_21_swizzled_transpose_cu_main6ignoreE[1];
-.global .align 1 .b8 _ZN48_INTERNAL_7c70280d_21_swizzled_transpose_cu_main4cuda3std3__419piecewise_constructE[1];
-.global .align 1 .b8 _ZN48_INTERNAL_7c70280d_21_swizzled_transpose_cu_main4cuda3std3__48in_placeE[1];
-.global .align 1 .b8 _ZN48_INTERNAL_7c70280d_21_swizzled_transpose_cu_main4cuda3std3__420unreachable_sentinelE[1];
-.global .align 1 .b8 _ZN48_INTERNAL_7c70280d_21_swizzled_transpose_cu_main4cuda3std3__47nulloptE[1];
-.global .align 1 .b8 _ZN48_INTERNAL_7c70280d_21_swizzled_transpose_cu_main4cuda3std3__48unexpectE[1];
-.global .align 1 .b8 _ZN48_INTERNAL_7c70280d_21_swizzled_transpose_cu_main4cuda3std6ranges3__45__cpo4swapE[1];
-.global .align 1 .b8 _ZN48_INTERNAL_7c70280d_21_swizzled_transpose_cu_main4cuda3std6ranges3__45__cpo9iter_moveE[1];
-.global .align 1 .b8 _ZN48_INTERNAL_7c70280d_21_swizzled_transpose_cu_main4cuda3std6ranges3__45__cpo5beginE[1];
-.global .align 1 .b8 _ZN48_INTERNAL_7c70280d_21_swizzled_transpose_cu_main4cuda3std6ranges3__45__cpo3endE[1];
-.global .align 1 .b8 _ZN48_INTERNAL_7c70280d_21_swizzled_transpose_cu_main4cuda3std6ranges3__45__cpo6cbeginE[1];
-.global .align 1 .b8 _ZN48_INTERNAL_7c70280d_21_swizzled_transpose_cu_main4cuda3std6ranges3__45__cpo4cendE[1];
-.global .align 1 .b8 _ZN48_INTERNAL_7c70280d_21_swizzled_transpose_cu_main4cuda3std6ranges3__45__cpo7advanceE[1];
-.global .align 1 .b8 _ZN48_INTERNAL_7c70280d_21_swizzled_transpose_cu_main4cuda3std6ranges3__45__cpo9iter_swapE[1];
-.global .align 1 .b8 _ZN48_INTERNAL_7c70280d_21_swizzled_transpose_cu_main4cuda3std6ranges3__45__cpo4nextE[1];
-.global .align 1 .b8 _ZN48_INTERNAL_7c70280d_21_swizzled_transpose_cu_main4cuda3std6ranges3__45__cpo4prevE[1];
-.global .align 1 .b8 _ZN48_INTERNAL_7c70280d_21_swizzled_transpose_cu_main4cuda3std6ranges3__45__cpo4dataE[1];
-.global .align 1 .b8 _ZN48_INTERNAL_7c70280d_21_swizzled_transpose_cu_main4cuda3std6ranges3__45__cpo5cdataE[1];
-.global .align 1 .b8 _ZN48_INTERNAL_7c70280d_21_swizzled_transpose_cu_main4cuda3std6ranges3__45__cpo4sizeE[1];
-.global .align 1 .b8 _ZN48_INTERNAL_7c70280d_21_swizzled_transpose_cu_main4cuda3std6ranges3__45__cpo5ssizeE[1];
-.global .align 1 .b8 _ZN48_INTERNAL_7c70280d_21_swizzled_transpose_cu_main4cuda3std6ranges3__45__cpo8distanceE[1];
-.global .align 1 .b8 _ZN48_INTERNAL_7c70280d_21_swizzled_transpose_cu_main6thrust23THRUST_300001_SM_800_NS8cuda_cub3parE[1];
-.global .align 1 .b8 _ZN48_INTERNAL_7c70280d_21_swizzled_transpose_cu_main6thrust23THRUST_300001_SM_800_NS8cuda_cub10par_nosyncE[1];
-.global .align 1 .b8 _ZN48_INTERNAL_7c70280d_21_swizzled_transpose_cu_main6thrust23THRUST_300001_SM_800_NS6system6detail10sequential3seqE[1];
-.global .align 1 .b8 _ZN48_INTERNAL_7c70280d_21_swizzled_transpose_cu_main6thrust23THRUST_300001_SM_800_NS12placeholders2_1E[1];
-.global .align 1 .b8 _ZN48_INTERNAL_7c70280d_21_swizzled_transpose_cu_main6thrust23THRUST_300001_SM_800_NS12placeholders2_2E[1];
-.global .align 1 .b8 _ZN48_INTERNAL_7c70280d_21_swizzled_transpose_cu_main6thrust23THRUST_300001_SM_800_NS12placeholders2_3E[1];
-.global .align 1 .b8 _ZN48_INTERNAL_7c70280d_21_swizzled_transpose_cu_main6thrust23THRUST_300001_SM_800_NS12placeholders2_4E[1];
-.global .align 1 .b8 _ZN48_INTERNAL_7c70280d_21_swizzled_transpose_cu_main6thrust23THRUST_300001_SM_800_NS12placeholders2_5E[1];
-.global .align 1 .b8 _ZN48_INTERNAL_7c70280d_21_swizzled_transpose_cu_main6thrust23THRUST_300001_SM_800_NS12placeholders2_6E[1];
-.global .align 1 .b8 _ZN48_INTERNAL_7c70280d_21_swizzled_transpose_cu_main6thrust23THRUST_300001_SM_800_NS12placeholders2_7E[1];
-.global .align 1 .b8 _ZN48_INTERNAL_7c70280d_21_swizzled_transpose_cu_main6thrust23THRUST_300001_SM_800_NS12placeholders2_8E[1];
-.global .align 1 .b8 _ZN48_INTERNAL_7c70280d_21_swizzled_transpose_cu_main6thrust23THRUST_300001_SM_800_NS12placeholders2_9E[1];
-.global .align 1 .b8 _ZN48_INTERNAL_7c70280d_21_swizzled_transpose_cu_main6thrust23THRUST_300001_SM_800_NS12placeholders3_10E[1];
-.global .align 1 .b8 _ZN48_INTERNAL_7c70280d_21_swizzled_transpose_cu_main6thrust23THRUST_300001_SM_800_NS3seqE[1];
-.global .align 1 .b8 _ZN48_INTERNAL_7c70280d_21_swizzled_transpose_cu_main4cute7productE[1];
-.global .align 1 .b8 _ZN48_INTERNAL_7c70280d_21_swizzled_transpose_cu_main4cute1_E[1];
+.global .align 1 .b8 _ZN48_INTERNAL_23c3e0ed_21_swizzled_transpose_cu_main4cuda3std3__45__cpo5beginE[1];
+.global .align 1 .b8 _ZN48_INTERNAL_23c3e0ed_21_swizzled_transpose_cu_main4cuda3std3__45__cpo3endE[1];
+.global .align 1 .b8 _ZN48_INTERNAL_23c3e0ed_21_swizzled_transpose_cu_main4cuda3std3__45__cpo6cbeginE[1];
+.global .align 1 .b8 _ZN48_INTERNAL_23c3e0ed_21_swizzled_transpose_cu_main4cuda3std3__45__cpo4cendE[1];
+.global .align 1 .b8 _ZN48_INTERNAL_23c3e0ed_21_swizzled_transpose_cu_main4cuda3std3__45__cpo6rbeginE[1];
+.global .align 1 .b8 _ZN48_INTERNAL_23c3e0ed_21_swizzled_transpose_cu_main4cuda3std3__45__cpo4rendE[1];
+.global .align 1 .b8 _ZN48_INTERNAL_23c3e0ed_21_swizzled_transpose_cu_main4cuda3std3__45__cpo7crbeginE[1];
+.global .align 1 .b8 _ZN48_INTERNAL_23c3e0ed_21_swizzled_transpose_cu_main4cuda3std3__45__cpo5crendE[1];
+.global .align 1 .b8 _ZN48_INTERNAL_23c3e0ed_21_swizzled_transpose_cu_main4cuda3std3__450_GLOBAL__N__23c3e0ed_21_swizzled_transpose_cu_main6ignoreE[1];
+.global .align 1 .b8 _ZN48_INTERNAL_23c3e0ed_21_swizzled_transpose_cu_main4cuda3std3__419piecewise_constructE[1];
+.global .align 1 .b8 _ZN48_INTERNAL_23c3e0ed_21_swizzled_transpose_cu_main4cuda3std3__48in_placeE[1];
+.global .align 1 .b8 _ZN48_INTERNAL_23c3e0ed_21_swizzled_transpose_cu_main4cuda3std3__420unreachable_sentinelE[1];
+.global .align 1 .b8 _ZN48_INTERNAL_23c3e0ed_21_swizzled_transpose_cu_main4cuda3std3__47nulloptE[1];
+.global .align 1 .b8 _ZN48_INTERNAL_23c3e0ed_21_swizzled_transpose_cu_main4cuda3std3__48unexpectE[1];
+.global .align 1 .b8 _ZN48_INTERNAL_23c3e0ed_21_swizzled_transpose_cu_main4cuda3std6ranges3__45__cpo4swapE[1];
+.global .align 1 .b8 _ZN48_INTERNAL_23c3e0ed_21_swizzled_transpose_cu_main4cuda3std6ranges3__45__cpo9iter_moveE[1];
+.global .align 1 .b8 _ZN48_INTERNAL_23c3e0ed_21_swizzled_transpose_cu_main4cuda3std6ranges3__45__cpo5beginE[1];
+.global .align 1 .b8 _ZN48_INTERNAL_23c3e0ed_21_swizzled_transpose_cu_main4cuda3std6ranges3__45__cpo3endE[1];
+.global .align 1 .b8 _ZN48_INTERNAL_23c3e0ed_21_swizzled_transpose_cu_main4cuda3std6ranges3__45__cpo6cbeginE[1];
+.global .align 1 .b8 _ZN48_INTERNAL_23c3e0ed_21_swizzled_transpose_cu_main4cuda3std6ranges3__45__cpo4cendE[1];
+.global .align 1 .b8 _ZN48_INTERNAL_23c3e0ed_21_swizzled_transpose_cu_main4cuda3std6ranges3__45__cpo7advanceE[1];
+.global .align 1 .b8 _ZN48_INTERNAL_23c3e0ed_21_swizzled_transpose_cu_main4cuda3std6ranges3__45__cpo9iter_swapE[1];
+.global .align 1 .b8 _ZN48_INTERNAL_23c3e0ed_21_swizzled_transpose_cu_main4cuda3std6ranges3__45__cpo4nextE[1];
+.global .align 1 .b8 _ZN48_INTERNAL_23c3e0ed_21_swizzled_transpose_cu_main4cuda3std6ranges3__45__cpo4prevE[1];
+.global .align 1 .b8 _ZN48_INTERNAL_23c3e0ed_21_swizzled_transpose_cu_main4cuda3std6ranges3__45__cpo4dataE[1];
+.global .align 1 .b8 _ZN48_INTERNAL_23c3e0ed_21_swizzled_transpose_cu_main4cuda3std6ranges3__45__cpo5cdataE[1];
+.global .align 1 .b8 _ZN48_INTERNAL_23c3e0ed_21_swizzled_transpose_cu_main4cuda3std6ranges3__45__cpo4sizeE[1];
+.global .align 1 .b8 _ZN48_INTERNAL_23c3e0ed_21_swizzled_transpose_cu_main4cuda3std6ranges3__45__cpo5ssizeE[1];
+.global .align 1 .b8 _ZN48_INTERNAL_23c3e0ed_21_swizzled_transpose_cu_main4cuda3std6ranges3__45__cpo8distanceE[1];
+.global .align 1 .b8 _ZN48_INTERNAL_23c3e0ed_21_swizzled_transpose_cu_main6thrust23THRUST_300001_SM_800_NS8cuda_cub3parE[1];
+.global .align 1 .b8 _ZN48_INTERNAL_23c3e0ed_21_swizzled_transpose_cu_main6thrust23THRUST_300001_SM_800_NS8cuda_cub10par_nosyncE[1];
+.global .align 1 .b8 _ZN48_INTERNAL_23c3e0ed_21_swizzled_transpose_cu_main6thrust23THRUST_300001_SM_800_NS6system6detail10sequential3seqE[1];
+.global .align 1 .b8 _ZN48_INTERNAL_23c3e0ed_21_swizzled_transpose_cu_main6thrust23THRUST_300001_SM_800_NS12placeholders2_1E[1];
+.global .align 1 .b8 _ZN48_INTERNAL_23c3e0ed_21_swizzled_transpose_cu_main6thrust23THRUST_300001_SM_800_NS12placeholders2_2E[1];
+.global .align 1 .b8 _ZN48_INTERNAL_23c3e0ed_21_swizzled_transpose_cu_main6thrust23THRUST_300001_SM_800_NS12placeholders2_3E[1];
+.global .align 1 .b8 _ZN48_INTERNAL_23c3e0ed_21_swizzled_transpose_cu_main6thrust23THRUST_300001_SM_800_NS12placeholders2_4E[1];
+.global .align 1 .b8 _ZN48_INTERNAL_23c3e0ed_21_swizzled_transpose_cu_main6thrust23THRUST_300001_SM_800_NS12placeholders2_5E[1];
+.global .align 1 .b8 _ZN48_INTERNAL_23c3e0ed_21_swizzled_transpose_cu_main6thrust23THRUST_300001_SM_800_NS12placeholders2_6E[1];
+.global .align 1 .b8 _ZN48_INTERNAL_23c3e0ed_21_swizzled_transpose_cu_main6thrust23THRUST_300001_SM_800_NS12placeholders2_7E[1];
+.global .align 1 .b8 _ZN48_INTERNAL_23c3e0ed_21_swizzled_transpose_cu_main6thrust23THRUST_300001_SM_800_NS12placeholders2_8E[1];
+.global .align 1 .b8 _ZN48_INTERNAL_23c3e0ed_21_swizzled_transpose_cu_main6thrust23THRUST_300001_SM_800_NS12placeholders2_9E[1];
+.global .align 1 .b8 _ZN48_INTERNAL_23c3e0ed_21_swizzled_transpose_cu_main6thrust23THRUST_300001_SM_800_NS12placeholders3_10E[1];
+.global .align 1 .b8 _ZN48_INTERNAL_23c3e0ed_21_swizzled_transpose_cu_main6thrust23THRUST_300001_SM_800_NS3seqE[1];
+.global .align 1 .b8 _ZN48_INTERNAL_23c3e0ed_21_swizzled_transpose_cu_main4cute7productE[1];
+.global .align 1 .b8 _ZN48_INTERNAL_23c3e0ed_21_swizzled_transpose_cu_main4cute1_E[1];
 .global .align 1 .b8 $str$16[67] = {40, 98, 108, 111, 99, 107, 68, 105, 109, 46, 120, 32, 42, 32, 98, 108, 111, 99, 107, 68, 105, 109, 46, 121, 32, 42, 32, 98, 108, 111, 99, 107, 68, 105, 109, 46, 122, 41, 32, 61, 61, 32, 84, 114, 97, 105, 116, 115, 58, 58, 107, 84, 104, 114, 101, 97, 100, 115, 80, 101, 114, 66, 108, 111, 99, 107};
-.global .align 1 .b8 $str$17[96] = {47, 109, 110, 116, 47, 99, 47, 85, 115, 101, 114, 115, 47, 100, 105, 98, 97, 107, 47, 68, 101, 115, 107, 116, 111, 112, 47, 103, 105, 116, 104, 117, 98, 95, 114, 101, 112, 111, 115, 47, 99, 117, 116, 101, 100, 115, 108, 95, 107, 101, 114, 110, 101, 108, 115, 47, 115, 119, 105, 122, 122, 108, 101, 100, 95, 116, 114, 97, 110, 115, 112, 111, 115, 101, 47, 115, 119, 105, 122, 122, 108, 101, 100, 95, 116, 114, 97, 110, 115, 112, 111, 115, 101, 46, 104};
+.global .align 1 .b8 $str$17[104] = {47, 109, 110, 116, 47, 99, 47, 85, 115, 101, 114, 115, 47, 100, 105, 98, 97, 107, 47, 68, 101, 115, 107, 116, 111, 112, 47, 103, 105, 116, 104, 117, 98, 95, 114, 101, 112, 111, 115, 47, 99, 117, 116, 101, 100, 115, 108, 95, 107, 101, 114, 110, 101, 108, 115, 47, 99, 112, 112, 95, 112, 116, 120, 47, 115, 119, 105, 122, 122, 108, 101, 100, 95, 116, 114, 97, 110, 115, 112, 111, 115, 101, 47, 115, 119, 105, 122, 122, 108, 101, 100, 95, 116, 114, 97, 110, 115, 112, 111, 115, 101, 46, 104};
 
 .visible .entry _ZN3cub17CUB_300001_SM_8006detail11EmptyKernelIvEEvv()
 {
@@ -2519,7 +2519,7 @@ $L__BB6_52:
 	.file	4 "/usr/local/cuda-13.0/targets/x86_64-linux/include/cccl/thrust/system/cuda/detail/uninitialized_fill.h"
 	.file	5 "/usr/local/cuda-13.0/targets/x86_64-linux/include/cccl/thrust/iterator/iterator_facade.h"
 	.file	6 "/usr/local/cuda-13.0/targets/x86_64-linux/include/cccl/thrust/iterator/iterator_adaptor.h"
-	.file	7 "/mnt/c/Users/dibak/Desktop/github_repos/cutedsl_kernels/swizzled_transpose/swizzled_transpose.h"
+	.file	7 "/mnt/c/Users/dibak/Desktop/github_repos/cutedsl_kernels/cpp_ptx/swizzled_transpose/swizzled_transpose.h"
 	.section	.debug_str
 	{
 $L__info_string0:
@@ -2662,7 +2662,7 @@ $L__info_string24:
 .b8 97,114,112,95,115,109,101,109,73,102,76,106,53,69,76,106,52,69,76,106,51,69,69,69,118,80,75,84,95,80,118,106,106,106,106,106,106,106,106,106
 .b8 106,106,0
 $L__info_string25:
-.b8 95,90,78,52,56,95,73,78,84,69,82,78,65,76,95,55,99,55,48,50,56,48,100,95,50,49,95,115,119,105,122,122,108,101,100,95,116,114,97,110
+.b8 95,90,78,52,56,95,73,78,84,69,82,78,65,76,95,50,51,99,51,101,48,101,100,95,50,49,95,115,119,105,122,122,108,101,100,95,116,114,97,110
 .b8 115,112,111,115,101,95,99,117,95,109,97,105,110,49,56,115,119,105,122,122,108,101,100,95,116,114,97,110,115,112,111,115,101,49,57,115,119,105,122,122
 .b8 108,101,95,115,109,101,109,95,111,102,102,115,101,116,73,76,105,53,69,76,105,52,69,76,105,51,69,69,69,106,106,0
 $L__info_string26:
