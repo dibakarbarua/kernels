@@ -283,18 +283,18 @@ __device__ __forceinline__ void load_stage_to_warp_smem(
 {
     for (uint32_t row_in_stage = 0; row_in_stage < rows_per_warp; ++row_in_stage)
     {
+        uint32_t const stage_row_base = stage_idx * rows_per_stage;
         uint32_t const warp_row_base = warp_idx * rows_per_warp;
-        uint32_t const stage_offset = stage_idx * rows_per_stage;
-        uint32_t const warp_row = warp_row_base + stage_offset + row_in_stage;
+        uint32_t const warp_row = stage_row_base + warp_row_base + row_in_stage;
         uint32_t const gmem_load_y = tile_start_y + warp_row;
         uint32_t const gmem_load_x = tile_start_x + lane_idx;
         bool const gmem_load_pred = (gmem_load_y < rows) && (gmem_load_x < cols);
 
         uint32_t const gmem_load_offset = gmem_load_y * cols + gmem_load_x;
 
-        // store transposed so we can read from SMEM coalesced
+        // Each warp transposes its own 32x32 tile in a private SMEM region.
         uint32_t const smem_write_y = lane_idx;
-        uint32_t const smem_write_x = warp_row;
+        uint32_t const smem_write_x = row_in_stage;
         uint32_t const smem_write_linear_offset =
             (smem_write_y * cols_per_tile + smem_write_x) * sizeof(T);
         uint32_t const smem_write_offset =
@@ -331,16 +331,18 @@ __device__ __forceinline__ void store_transposed_stage_from_warp_smem(
 
     for (uint32_t row_in_stage = 0; row_in_stage < rows_per_warp; ++row_in_stage)
     {
+        uint32_t const stage_row_base = stage_idx * rows_per_stage;
         uint32_t const warp_row_base = warp_idx * rows_per_warp;
-        uint32_t const stage_offset = stage_idx * rows_per_stage;
-        uint32_t const warp_row = warp_row_base + stage_offset + row_in_stage;
-        uint32_t const gmem_store_y = tile_start_x + warp_row_base + warp_row;
-        uint32_t const gmem_store_x = tile_start_y + lane_idx;
+        uint32_t const gmem_store_y = tile_start_x + row_in_stage;
+        // NOTE: stage_row_base + warp_row_base is an important offset to get right
+        // We need to be at the correct y-tile and then we index by lane
+        uint32_t const gmem_store_x = tile_start_y + stage_row_base + warp_row_base +
+                                      lane_idx;
         bool const gmem_store_pred = (gmem_store_y < cols) && (gmem_store_x < rows);
 
         uint32_t const gmem_store_offset = gmem_store_y * rows + gmem_store_x;
 
-        uint32_t const smem_read_y = warp_row;
+        uint32_t const smem_read_y = row_in_stage;
         uint32_t const smem_read_x = lane_idx;
         uint32_t const smem_read_linear_offset =
             (smem_read_y * cols_per_tile + smem_read_x) * sizeof(T);
@@ -356,9 +358,6 @@ __device__ __forceinline__ void store_transposed_stage_from_warp_smem(
 template <typename T, int StagesPerWarp>
 struct TransposeSharedStorage
 {
-    static_assert(StagesPerWarp == 1 || StagesPerWarp == 2,
-                  "StagesPerWarp must currently be 1 or 2.");
-
     using Element = T;
     using Traits = TransposeTileTraits<T>;
 
@@ -370,7 +369,7 @@ struct TransposeSharedStorage
     static constexpr int kElementsPerWarpStage = kRowsPerWarp * kTileCols;
 
     alignas(16) Element
-        smem[kWarpsPerBlock][kStagesPerWarp][kRowsPerWarp][kTileCols];
+        smem[kStagesPerWarp][kWarpsPerBlock][kRowsPerWarp][kTileCols];
 };
 
 template <typename T, int StagesPerWarp>
@@ -384,8 +383,6 @@ void transpose_kernel(T const* input, T* output, int rows, int cols)
                   "This transpose kernel currently supports exactly 4 warps.");
     static_assert(sizeof(T) == 4,
                   "transpose_kernel currently supports only 4-byte element types.");
-    static_assert(StagesPerWarp == 1 || StagesPerWarp == 2,
-                  "transpose_kernel currently supports only 1 or 2 stages per warp.");
     static_assert(Traits::kTileRows == 32 && Traits::kTileCols == 32,
                   "The 4-byte transpose kernel expects a 32x32 tile.");
 
@@ -399,15 +396,16 @@ void transpose_kernel(T const* input, T* output, int rows, int cols)
     constexpr uint32_t kRowsPerTile = Traits::kTileRows;
     constexpr uint32_t kColsPerTile = Traits::kTileCols;
     constexpr uint32_t kRowsPerWarp = kRowsPerTile;
-    // each stage is contiguous TileRows x TileCols, warp-by-warp
+    // Each stage covers one 32x32 tile per warp, stacked along the input-row axis.
     constexpr uint32_t kRowsPerStage = kRowsPerWarp * Traits::kWarpsPerBlock;
+    constexpr uint32_t kRowsPerCtaIteration = kRowsPerStage * StagesPerWarp;
 
     uint32_t const cta_tile_idx_x = blockIdx.x;
     uint32_t const cta_tile_idx_y = blockIdx.y;
     uint32_t const cta_tile_start_x = cta_tile_idx_x * kColsPerTile;
-    uint32_t const cta_tile_start_y = cta_tile_idx_y * kRowsPerTile;
+    uint32_t const cta_tile_start_y = cta_tile_idx_y * kRowsPerCtaIteration;
     uint32_t const cta_tile_step_x = gridDim.x * kColsPerTile;
-    uint32_t const cta_tile_step_y = gridDim.y * kRowsPerTile;
+    uint32_t const cta_tile_step_y = gridDim.y * kRowsPerCtaIteration;
     uint32_t const lane_idx = threadIdx.x & (Traits::kWarpSize - 1);
     uint32_t const warp_idx = threadIdx.x / Traits::kWarpSize;
 
@@ -423,7 +421,7 @@ void transpose_kernel(T const* input, T* output, int rows, int cols)
             for (uint32_t stage_idx = 0; stage_idx < StagesPerWarp; ++stage_idx)
             {
                 void* const smem_stage_base =
-                    static_cast<void*>(&shared_storage.smem[warp_idx][stage_idx][0][0]);
+                    static_cast<void*>(&shared_storage.smem[stage_idx][warp_idx][0][0]);
 
                 load_stage_to_warp_smem<T, kSwizzleB, kSwizzleM, kSwizzleS>(
                     input,
@@ -449,7 +447,7 @@ void transpose_kernel(T const* input, T* output, int rows, int cols)
             {
                 void const* const smem_stage_base_const =
                     static_cast<void const*>(
-                        &shared_storage.smem[warp_idx][stage_idx][0][0]);
+                        &shared_storage.smem[stage_idx][warp_idx][0][0]);
 
                 store_transposed_stage_from_warp_smem<
                     T, kSwizzleB, kSwizzleM, kSwizzleS>(

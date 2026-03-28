@@ -158,7 +158,7 @@ void run_case(Options const& options)
     dim3 const block_dim(
         swizzled_transpose::TransposeTileTraits<T>::kThreadsPerBlock);
     // 48 SMs in the RTX 3080
-    dim3 const grid_dim(8, 6);
+    dim3 const grid_dim(64, 48);
 
     int max_active_blocks_per_sm = 0;
     check_cuda(
@@ -183,6 +183,7 @@ void run_case(Options const& options)
               << grid_dim.z << ")\n";
     std::cout << "Block dim: (" << block_dim.x << ", " << block_dim.y << ", "
               << block_dim.z << ")\n";
+    std::cout << "Stages: " << kStagesPerWarp << std::endl;
     std::cout << "SM count: " << num_sms << '\n';
     std::cout << "Max active blocks per SM for this kernel: "
               << max_active_blocks_per_sm << '\n';
