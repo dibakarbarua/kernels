@@ -13,7 +13,7 @@
 - SRAM modules in ML ASICs are usually banked at a high width (4B-16B or more) to allow high throughput access per thread/lane
 - These banks are of a fixed number (for example 32x4B banks in NVIDIA GPUs) after which the banks repeat
 - For accessing data from a single warp/SIMD operation this leads to contiguous addresses and no conflicts if all lanes access 32B
-- But there are two cases when there can be bank-conflicts:
+- But there are two cases when ther e can be bank-conflicts:
     - Transposed Access (SIMD operations read/write strided i.e a full column)
     - Concurrent Access of different rows by different SIMD Units or FF Units (TensorCores in NVIDIA)
 
@@ -441,6 +441,7 @@ void transpose_kernel(T const* input, T* output, int rows, int cols)
                 cp_async_commit_group();
             }
 
+            // IMPORTANT!: This is sub-optimal, we only need to wait for one-stage before transpose
             cp_async_wait_all();
 
             for (uint32_t stage_idx = 0; stage_idx < StagesPerWarp; ++stage_idx)
