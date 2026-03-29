@@ -8,6 +8,8 @@
 
 #include <cute/tensor.hpp>
 
+#include "Utils.h"
+
 /*
 ---- Swizzling ----
 - SRAM modules in ML ASICs are usually banked at a high width (4B-16B or more) to allow high throughput access per thread/lane
@@ -124,6 +126,13 @@ With a minimum of 32 cachelines outstanding per SM, that latency is also hidden 
 
 namespace swizzled_transpose {
 
+using cpp_ptx::utils::cp_async_commit_group;
+using cpp_ptx::utils::cp_async_gmem_to_smem_zfill;
+using cpp_ptx::utils::cp_async_wait_all;
+using cpp_ptx::utils::load_from_scratch;
+using cpp_ptx::utils::store_to_global;
+using cpp_ptx::utils::swizzle_smem_offset;
+
 template <typename T>
 struct TransposeTileTraits
 {
@@ -142,128 +151,6 @@ struct TransposeTileTraits
     static constexpr int kTileCols = kTileExtent;
     static constexpr int kElementsPerWarp = kTileRows * kTileCols;
 };
-
-template <int B, int M, int S>
-struct SharedMemorySwizzle
-{
-    static_assert(B > 0, "B must be positive.");
-    static_assert(M >= 0, "M must be non-negative.");
-    static_assert(S > 0, "S must be positive.");
-    static_assert(B < 32, "B must fit within a 32-bit offset.");
-    static_assert(M + B <= 32, "M + B must fit within a 32-bit offset.");
-    static_assert(M + S + B <= 32,
-                  "The shifted source bit range must fit within a 32-bit offset.");
-
-    static constexpr uint32_t kBitMask = (uint32_t{1} << B) - 1u;
-
-    CUTE_HOST_DEVICE static constexpr uint32_t
-    apply(uint32_t smem_offset_bytes)
-    {
-        uint32_t const shifted_bits =
-            (smem_offset_bytes >> (M + S)) & kBitMask;
-        return smem_offset_bytes ^ (shifted_bits << M);
-    }
-};
-
-template <int B, int M, int S>
-CUTE_HOST_DEVICE static constexpr uint32_t
-swizzle_smem_offset(uint32_t smem_offset_bytes)
-{
-    return SharedMemorySwizzle<B, M, S>::apply(smem_offset_bytes);
-}
-
-__device__ __forceinline__ uint32_t cast_smem_ptr_to_uint(void const* ptr)
-{
-    return static_cast<uint32_t>(__cvta_generic_to_shared(ptr));
-}
-
-template <int Bytes>
-__device__ __forceinline__ void cp_async_gmem_to_smem(void* smem_ptr,
-                                                      void const* gmem_ptr)
-{
-    static_assert(Bytes == 4 || Bytes == 8 || Bytes == 16,
-                  "cp.async only supports 4B, 8B, and 16B transactions.");
-
-#if defined(__CUDA_ARCH__) && (__CUDA_ARCH__ >= 800) && (Bytes == 16)
-    uint32_t const smem_addr = cast_smem_ptr_to_uint(smem_ptr);
-    asm volatile("cp.async.cg.shared.global [%0], [%1], %2;\n"
-                 :
-                 : "r"(smem_addr), "l"(gmem_ptr), "n"(Bytes));
-#else
-    using AccessType = cute::array_aligned<uint8_t, Bytes, Bytes>;
-    *reinterpret_cast<AccessType*>(smem_ptr) =
-        *reinterpret_cast<AccessType const*>(gmem_ptr);
-#endif
-}
-
-template <int Bytes>
-__device__ __forceinline__ void cp_async_gmem_to_smem_zfill(
-    void* smem_ptr, void const* gmem_ptr, bool pred_guard)
-{
-    static_assert(Bytes == 4 || Bytes == 8 || Bytes == 16,
-                  "cp.async only supports 4B, 8B, and 16B transactions.");
-
-#if defined(__CUDA_ARCH__) && (__CUDA_ARCH__ >= 800) && (Bytes == 16)
-    uint32_t const smem_addr = cast_smem_ptr_to_uint(smem_ptr);
-    int const valid_bytes = pred_guard ? Bytes : 0;
-    asm volatile("cp.async.cg.shared.global [%0], [%1], %2, %3;\n"
-                 :
-                 : "r"(smem_addr), "l"(gmem_ptr), "n"(Bytes), "r"(valid_bytes));
-#else
-    using AccessType = cute::array_aligned<uint8_t, Bytes, Bytes>;
-    if (pred_guard)
-    {
-        *reinterpret_cast<AccessType*>(smem_ptr) =
-            *reinterpret_cast<AccessType const*>(gmem_ptr);
-    }
-    else
-    {
-        *reinterpret_cast<AccessType*>(smem_ptr) = AccessType{};
-    }
-#endif
-}
-
-__device__ __forceinline__ void cp_async_commit_group()
-{
-#if defined(__CUDA_ARCH__) && (__CUDA_ARCH__ >= 800)
-    asm volatile("cp.async.commit_group;\n" : :);
-#endif
-}
-
-template <int Groups>
-__device__ __forceinline__ void cp_async_wait_group()
-{
-#if defined(__CUDA_ARCH__) && (__CUDA_ARCH__ >= 800)
-    asm volatile("cp.async.wait_group %0;\n" : : "n"(Groups));
-#endif
-}
-
-__device__ __forceinline__ void cp_async_wait_all()
-{
-#if defined(__CUDA_ARCH__) && (__CUDA_ARCH__ >= 800)
-    asm volatile("cp.async.wait_all;\n" : :);
-#endif
-}
-
-template <typename T>
-__device__ __forceinline__ T load_from_scratch(void const* scratch_ptr,
-                                               uint32_t scratch_offset_bytes)
-{
-    return *reinterpret_cast<T const*>(
-        reinterpret_cast<char const*>(scratch_ptr) + scratch_offset_bytes);
-}
-
-template <typename T>
-__device__ __forceinline__ void store_to_global(T* gmem_ptr,
-                                                uint32_t gmem_offset_elements,
-                                                T value,
-                                                bool pred_guard)
-{
-    if (pred_guard)
-    {
-        gmem_ptr[gmem_offset_elements] = value;
-    }
-}
 
 template <typename T, uint32_t SwizzleB, uint32_t SwizzleM, uint32_t SwizzleS>
 __device__ __forceinline__ void load_stage_to_warp_smem(

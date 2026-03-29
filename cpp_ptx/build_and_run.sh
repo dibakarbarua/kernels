@@ -237,6 +237,7 @@ COMMON_FLAGS=(
     "-std=${CXX_STD}"
     "-O3"
     "-lineinfo"
+    "-I${SCRIPT_DIR}"
     "-I${CUTLASS_DIR}/include"
     "-arch=sm_${SM_ARCH}"
 )
