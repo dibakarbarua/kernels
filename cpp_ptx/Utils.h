@@ -198,5 +198,10 @@ __device__ __forceinline__ float horizontal_add_f16x2(half2 value)
     return unpacked.x + unpacked.y;
 }
 
+__device__ __forceinline__ float half2ToFloat(half2 value)
+{
+    return horizontal_add_f16x2(value);
+}
+
 } // namespace utils
 } // namespace cpp_ptx
