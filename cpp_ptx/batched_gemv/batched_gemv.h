@@ -89,7 +89,7 @@ struct GemvKernelTraits
     static_assert(TileLen > 0 && (TileLen % WarpsPerBlock) == 0,
                   "TileLen must be divisible by the number of warps.");
     static_assert(TileLen % 128 == 0, 
-                  "With 4 warps/CTA, we need atleast 32 rows per warp in B-matrix to vectorize stores.")
+                  "With 4 warps/CTA, we need atleast 32 rows per warp in B-matrix to vectorize stores.");
     static_assert(EmbeddingDim > 0 && (EmbeddingDim % 2) == 0,
                   "EmbeddingDim must be even for packed f16x2 math.");
     static_assert(WarpsPerBlock == 4,
@@ -144,19 +144,19 @@ __global__ __launch_bounds__(Traits::kThreadsPerBlock) void batched_gemv_kernel(
     uint32_t const warp_idx = threadIdx.x / Traits::kWarpSize;
     uint32_t const lane_idx = threadIdx.x & (Traits::kWarpSize - 1);
 
-    int const seq_idx_start = static_cast<int>(blockIdx.x);
-    int const seq_idx_end = num_batches;
-    int const seq_idx_step = static_cast<int>(gridDim.x);
+    int const batch_idx_start = static_cast<int>(blockIdx.x);
+    int const batch_idx_end = num_batches;
+    int const batch_idx_step = static_cast<int>(gridDim.x);
 
     // OuterLoop: Across batches, CTA-parallel
-    for (int seq_idx = seq_idx_start; seq_idx < seq_idx_end; seq_idx += seq_idx_step)
+    for (int batch_idx = batch_idx_start; batch_idx < batch_idx_end; batch_idx += batch_idx_step)
     {
         T const* const query_batch =
-            query + static_cast<size_t>(seq_idx) * Traits::kEmbeddingDim;
+            query + static_cast<size_t>(batch_idx) * Traits::kEmbeddingDim;
         T const* const key_batch =
-            key + static_cast<size_t>(seq_idx) * seq_len * Traits::kEmbeddingDim;
+            key + static_cast<size_t>(batch_idx) * seq_len * Traits::kEmbeddingDim;
         float* const output_batch =
-            output + static_cast<size_t>(seq_idx) * seq_len;
+            output + static_cast<size_t>(batch_idx) * seq_len;
 
         void* const query_stage =
             static_cast<void*>(&shared_storage.query[warp_idx][0]);
@@ -201,7 +201,7 @@ __global__ __launch_bounds__(Traits::kThreadsPerBlock) void batched_gemv_kernel(
 #pragma unroll
                 // Load inner-dimension of B-Matrix-row (vector), one vectorized load at a time
                 for(uint32_t vec_idx = 0; vec_idx < Traits::kEmbeddingDim; 
-                    vec_idx += Traits::kWarpSize * Traits::kElementsPerAccess)
+                    vec_idx += Traits::kWarpSize * Traits::kLoadElemsPerLane)
                     {
                         bool const pred = seq_idx < seq_len;
                         uint32_t const elem_offset =
@@ -238,8 +238,6 @@ __global__ __launch_bounds__(Traits::kThreadsPerBlock) void batched_gemv_kernel(
 #pragma unroll
                 for (uint32_t row_idx = 0; row_idx < Traits::kRowsPerStagePerWarp; row_idx++)
                 {
-                    int const seq_idx = seq_base + row_idx;
-
                     half const* const key_row_smem_base =
                         reinterpret_cast<half const*>(
                             &shared_storage.key[stage_idx][warp_idx][row_idx][0]);
