@@ -13,7 +13,6 @@ namespace batched_gemv {
 
 using cpp_ptx::utils::cp_async_commit_group;
 using cpp_ptx::utils::cp_async_gmem_to_smem_zfill;
-using cpp_ptx::utils::cp_async_smem_to_gmem;
 using cpp_ptx::utils::cp_async_wait_all;
 using cpp_ptx::utils::fma_f16x2;
 using cpp_ptx::utils::half2ToFloat;
@@ -145,8 +144,7 @@ __global__ __launch_bounds__(Traits::kThreadsPerBlock) void batched_gemv_kernel(
     uint32_t const warp_idx = threadIdx.x / Traits::kWarpSize;
     uint32_t const lane_idx = threadIdx.x & (Traits::kWarpSize - 1);
 
-    int const seq_idx_start =
-        static_cast<int>(blockIdx.x) * static_cast<int>(blockDim.x);
+    int const seq_idx_start = static_cast<int>(blockIdx.x);
     int const seq_idx_end = num_batches;
     int const seq_idx_step = static_cast<int>(gridDim.x);
 
@@ -207,7 +205,7 @@ __global__ __launch_bounds__(Traits::kThreadsPerBlock) void batched_gemv_kernel(
                     {
                         bool const pred = seq_idx < seq_len;
                         uint32_t const elem_offset =
-                        vec_idx * Traits::kLoadElemsPerLane;
+                            vec_idx * Traits::kLoadElemsPerLane;
                         uint32_t const smem_byte_offset =
                             (row_idx * Traits::kEmbeddingDim + elem_offset) * sizeof(T);
                         size_t const gmem_elem_offset =
@@ -236,7 +234,7 @@ __global__ __launch_bounds__(Traits::kThreadsPerBlock) void batched_gemv_kernel(
                 half const* const query_smem_base =
                     reinterpret_cast<half const*>(&shared_storage.query[warp_idx][0]);
 
-                float store_val;
+                float store_val = 0.0f;
 #pragma unroll
                 for (uint32_t row_idx = 0; row_idx < Traits::kRowsPerStagePerWarp; row_idx++)
                 {
@@ -279,49 +277,10 @@ __global__ __launch_bounds__(Traits::kThreadsPerBlock) void batched_gemv_kernel(
                 // Once all rows of the warp for this stage (32) have been completed,
                 // ... can write out coalesced to GMEM
                 store_to_global(output_batch, lane_idx, store_val, true);
+                }
             }
         }
     }
-}
-
-template <int Stages, typename T, typename Traits = GemvKernelTraits<T>>
-inline dim3 get_grid_dim(LaunchParams<T> const& params)
-{
-    return dim3(static_cast<unsigned>((params.num_batches + Traits::kThreadsPerBlock - 1) /
-                                      Traits::kThreadsPerBlock),
-                1u,
-                1u);
-}
-
-template <int Stages, typename T, typename Traits = GemvKernelTraits<T>>
-inline dim3 get_block_dim()
-{
-    return dim3(static_cast<unsigned>(Traits::kThreadsPerBlock), 1u, 1u);
-}
-
-template <int Stages, typename T, typename Traits = GemvKernelTraits<T>>
-inline cudaError_t launch(LaunchParams<T> const& params,
-                          cudaStream_t stream = nullptr)
-{
-    static_assert(Stages > 0, "Stages must be positive.");
-
-    if (params.query == nullptr || params.key == nullptr || params.output == nullptr)
-    {
-        return cudaErrorInvalidDevicePointer;
-    }
-    if (params.num_batches <= 0 || params.seq_len <= 0)
-    {
-        return cudaErrorInvalidValue;
-    }
-
-    batched_gemv_kernel<Stages, T, Traits>
-        <<<get_grid_dim<Stages, T, Traits>(params), get_block_dim<Stages, T, Traits>(), 0, stream>>>(
-            params.query,
-            params.key,
-            params.output,
-            params.num_batches,
-            params.seq_len);
-    return cudaGetLastError();
 }
 
 } // namespace batched_gemv
