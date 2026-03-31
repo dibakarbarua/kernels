@@ -4,6 +4,7 @@
 #include <cuda_fp16.h>
 #include <cuda_runtime_api.h>
 
+#include <cstdio>
 #include <cstdint>
 #include <type_traits>
 
@@ -80,8 +81,7 @@ PTX Instructions Used:
 template <typename T,
           int TileLen = 128,
           int EmbeddingDim = 128,
-          int WarpsPerBlock = 4,
-          int BytesPerLane = 4>
+          int WarpsPerBlock = 4>
 struct GemvKernelTraits
 {
     static_assert(std::is_same_v<T, half>,
@@ -94,8 +94,6 @@ struct GemvKernelTraits
                   "EmbeddingDim must be even for packed f16x2 math.");
     static_assert(WarpsPerBlock == 4,
                   "The kernel scaffolding assumes 4 warps per block.");
-    static_assert(BytesPerLane == 4,
-                  "The current SIMT staging path assumes 4 bytes per lane.");
 
     using Element = T;
 
@@ -105,9 +103,9 @@ struct GemvKernelTraits
     static constexpr int kTileLen = TileLen;
     static constexpr int kEmbeddingDim = EmbeddingDim;
     static constexpr int kTileLenPerWarp = kTileLen / kWarpsPerBlock;
-    static constexpr int kBytesPerLane = BytesPerLane;
-    static constexpr int kLoadElemsPerLane = kBytesPerLane / sizeof(T);
-    static constexpr int kFMAElemsPerLane = 2;
+    static constexpr int kBytesPerLane = sizeof(T) * 2; // packed float/half
+    static constexpr int kElemsPerLane = 2; // packed float/half
+    static constexpr int kElemsPerWarp = kEmbeddingDim / 2; // packed float/half
     static constexpr int kRowsPerStagePerWarp = kTileLenPerWarp;
 };
 
@@ -120,7 +118,6 @@ struct GemvSharedStorage
     alignas(16)
         T key[Stages][Traits::kWarpsPerBlock][Traits::kRowsPerStagePerWarp]
              [Traits::kEmbeddingDim];
-    alignas(16) float output[Stages][Traits::kWarpsPerBlock][Traits::kTileLenPerWarp];
 };
 
 template <typename T>
@@ -135,7 +132,11 @@ struct LaunchParams
 
 template <int Stages, typename T, typename Traits = GemvKernelTraits<T>>
 __global__ __launch_bounds__(Traits::kThreadsPerBlock) void batched_gemv_kernel(
-    T const* query, T const* key, float* output, int num_batches, int seq_len)
+    T const* query,
+    T const* key,
+    float* output,
+    int num_batches,
+    int seq_len)
 {
     using SharedStorage = GemvSharedStorage<T, Stages, Traits>;
 
@@ -164,11 +165,11 @@ __global__ __launch_bounds__(Traits::kThreadsPerBlock) void batched_gemv_kernel(
         // Load inner-dimension of A (vector) one vectorized load at a time
 #pragma unroll
         for (uint32_t vec_idx = lane_idx;
-             vec_idx < Traits::kEmbeddingDim;
-             vec_idx += Traits::kWarpSize * Traits::kLoadElemsPerLane)
+             vec_idx < Traits::kElemsPerWarp;
+             vec_idx += Traits::kWarpSize)
         {
             uint32_t const elem_offset =
-                vec_idx * Traits::kLoadElemsPerLane;
+                vec_idx * Traits::kElemsPerLane;
             uint32_t const byte_offset = elem_offset * sizeof(T);
             cp_async_gmem_to_smem_zfill<sizeof(uint32_t)>(
                 static_cast<char*>(query_stage) + byte_offset,
@@ -193,19 +194,20 @@ __global__ __launch_bounds__(Traits::kThreadsPerBlock) void batched_gemv_kernel(
                 void* const key_stage =
                     static_cast<void*>(&shared_storage.key[stage_idx][warp_idx][0][0]);
 
-            // Read each row of B-Matrix for current tile-stage
+                // Read each row of B-Matrix for current tile-stage
 #pragma unroll
-            for (uint32_t row_idx = 0; row_idx < Traits::kRowsPerStagePerWarp; row_idx++)
-            {
-                uint32_t seq_idx = seq_base + row_idx;
+                for (uint32_t row_idx = 0; row_idx < Traits::kRowsPerStagePerWarp; row_idx++)
+                {
+                    uint32_t seq_idx = seq_base + row_idx;
 #pragma unroll
-                // Load inner-dimension of B-Matrix-row (vector), one vectorized load at a time
-                for(uint32_t vec_idx = 0; vec_idx < Traits::kEmbeddingDim; 
-                    vec_idx += Traits::kWarpSize * Traits::kLoadElemsPerLane)
+                    // Load inner-dimension of B-Matrix-row (vector), one vectorized load at a time
+                    for(uint32_t vec_idx = lane_idx;
+                        vec_idx < Traits::kElemsPerWarp;
+                        vec_idx += Traits::kWarpSize)
                     {
                         bool const pred = seq_idx < seq_len;
                         uint32_t const elem_offset =
-                            vec_idx * Traits::kLoadElemsPerLane;
+                            vec_idx * Traits::kElemsPerLane;
                         uint32_t const smem_byte_offset =
                             (row_idx * Traits::kEmbeddingDim + elem_offset) * sizeof(T);
                         size_t const gmem_elem_offset =
@@ -221,6 +223,7 @@ __global__ __launch_bounds__(Traits::kThreadsPerBlock) void batched_gemv_kernel(
                             pred);
                     }
                     cp_async_commit_group();
+                }
             }
             cp_async_wait_all();
 
@@ -246,9 +249,8 @@ __global__ __launch_bounds__(Traits::kThreadsPerBlock) void batched_gemv_kernel(
 
                     // Load and compute FMA for A and B rows, vectorized
 #pragma unroll
-                for (int vec_idx = static_cast<int>(lane_idx);
-                         vec_idx < Traits::kEmbeddingDim;
-                         vec_idx += Traits::kWarpSize * Traits::kFMAElemsPerLane)
+                    for (int vec_idx = static_cast<int>(lane_idx); vec_idx < Traits::kElemsPerWarp;
+                            vec_idx += Traits::kWarpSize)
                     {
                         half2 const a =
                             reinterpret_cast<half2 const*>(query_smem_base)[vec_idx];
@@ -264,18 +266,25 @@ __global__ __launch_bounds__(Traits::kThreadsPerBlock) void batched_gemv_kernel(
 #pragma unroll
                     for (int offset = Traits::kWarpSize / 2; offset > 0; offset >>= 1)
                     {
-                        sum += __shfl_down_sync(0xffffffffu, sum, offset);
+                        // All lanes have correct sum after loop
+                        sum += __shfl_xor_sync(0xffffffffu, sum, offset);
                     }
-                    // Lane[0] has correct value
-                    store_val = sum;
-                    // Lane[row_idx] has correct value
-                    // Note: No overwrites as offsets keep increasing and lower lanes won't participate later...
-                    __shfl_up_sync(0xffffffffu, store_val, row_idx);
+
+                    // Predicated register load
+                    if (row_idx == lane_idx) {
+                        // to store vectorized
+                        store_val = sum;
+                    }
+                    // int const seq_idx = seq_base + static_cast<int>(row_idx);
+                    // if (lane_idx == 0 && seq_idx < seq_len)
+                    // {
+                    //     store_to_global(output_batch,
+                    //                     static_cast<uint32_t>(seq_idx),
+                    //                     sum,
+                    //                     true);
+                    // }
                 }
-                // Once all rows of the warp for this stage (32) have been completed,
-                // ... can write out coalesced to GMEM
-                store_to_global(output_batch, lane_idx, store_val, true);
-                }
+                store_to_global(output_batch + seq_base, lane_idx, store_val, (seq_base + lane_idx) < seq_len);
             }
         }
     }
