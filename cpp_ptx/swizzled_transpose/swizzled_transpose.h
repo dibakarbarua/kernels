@@ -128,7 +128,7 @@ namespace swizzled_transpose {
 
 using cpp_ptx::utils::cp_async_commit_group;
 using cpp_ptx::utils::cp_async_gmem_to_smem_zfill;
-using cpp_ptx::utils::cp_async_wait_all;
+using cpp_ptx::utils::cp_async_wait_group;
 using cpp_ptx::utils::load_from_scratch;
 using cpp_ptx::utils::store_to_global;
 using cpp_ptx::utils::swizzle_smem_offset;
@@ -329,7 +329,7 @@ void transpose_kernel(T const* input, T* output, int rows, int cols)
             }
 
             // IMPORTANT!: This is sub-optimal, we only need to wait for one-stage before transpose
-            cp_async_wait_all();
+            cp_async_wait_group<1>();
 
             for (uint32_t stage_idx = 0; stage_idx < StagesPerWarp; ++stage_idx)
             {
