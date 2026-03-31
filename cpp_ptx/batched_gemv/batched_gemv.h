@@ -3,7 +3,6 @@
 #include <cuda.h>
 #include <cuda_fp16.h>
 #include <cuda_runtime_api.h>
-
 #include <cstdio>
 #include <cstdint>
 #include <type_traits>
@@ -14,6 +13,7 @@ namespace batched_gemv {
 
 using cpp_ptx::utils::cp_async_commit_group;
 using cpp_ptx::utils::cp_async_gmem_to_smem_zfill;
+using cpp_ptx::utils::cp_async_wait_group;
 using cpp_ptx::utils::cp_async_wait_all;
 using cpp_ptx::utils::fma_f16x2;
 using cpp_ptx::utils::half2ToFloat;
@@ -178,6 +178,7 @@ __global__ __launch_bounds__(Traits::kThreadsPerBlock) void batched_gemv_kernel(
                 true);
         }
         cp_async_commit_group();
+        // wait for one coalesced load of A vector for this batch
         cp_async_wait_all();
 
         // InnerLoop: Across sequence, CTA-local
@@ -225,7 +226,8 @@ __global__ __launch_bounds__(Traits::kThreadsPerBlock) void batched_gemv_kernel(
                     cp_async_commit_group();
                 }
             }
-            cp_async_wait_all();
+            // wait for one stage data for B-Matrix = kRowsPerStagePerWarp x kEmbeddingDim
+            cp_async_wait_group<Traits::kRowsPerStagePerWarp>();
 
             // Single Iteration of A @ B-Matrix DPR: tile_rows * stages
 #pragma unroll
@@ -275,14 +277,6 @@ __global__ __launch_bounds__(Traits::kThreadsPerBlock) void batched_gemv_kernel(
                         // to store vectorized
                         store_val = sum;
                     }
-                    // int const seq_idx = seq_base + static_cast<int>(row_idx);
-                    // if (lane_idx == 0 && seq_idx < seq_len)
-                    // {
-                    //     store_to_global(output_batch,
-                    //                     static_cast<uint32_t>(seq_idx),
-                    //                     sum,
-                    //                     true);
-                    // }
                 }
                 store_to_global(output_batch + seq_base, lane_idx, store_val, (seq_base + lane_idx) < seq_len);
             }
