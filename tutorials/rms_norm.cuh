@@ -47,9 +47,9 @@ Tunables:
 numRowsPerCTA
 numStagesPerCTA
 
-So each CTA will process the entire d_model in 
+If we map each of the 32 warp loads to same row, each CTA will process the entire d_model in 
     32K/(numStagesPerCTA * 4 * 2 * 32) cycles
     This is because 4 warps per CTA, 2 elements per lane (packed) 
     ... and 32 lanes per warp.
-
+    = 128/numStagesPerCTA = 64 cycles for 2 stages
 */
