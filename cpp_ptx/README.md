@@ -2,7 +2,7 @@
 
 This directory holds standalone CUDA C++ kernel drivers that can be compiled to both native executables and PTX.
 
-Each kernel lives in its own subdirectory under `cpp_ptx/`. The shared [`build_and_run.sh`](/mnt/c/Users/dibak/Desktop/github_repos/cutedsl_kernels/cpp_ptx/build_and_run.sh) script builds any kernel directory that contains:
+Each kernel lives in its own subdirectory under `cpp_ptx/`. The shared [`build_and_run.sh`](build_and_run.sh) script builds any kernel directory that contains:
 
 - `<kernel>/<kernel>.cu` and `<kernel>/<kernel>.h`, or
 - exactly one `.cu` file and exactly one `.h` file in that directory

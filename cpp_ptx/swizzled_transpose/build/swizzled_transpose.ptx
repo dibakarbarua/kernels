@@ -2519,8 +2519,8 @@ $L__BB6_52:
 	.file	4 "/usr/local/cuda-13.0/targets/x86_64-linux/include/cccl/thrust/system/cuda/detail/uninitialized_fill.h"
 	.file	5 "/usr/local/cuda-13.0/targets/x86_64-linux/include/cccl/thrust/iterator/iterator_facade.h"
 	.file	6 "/usr/local/cuda-13.0/targets/x86_64-linux/include/cccl/thrust/iterator/iterator_adaptor.h"
-	.file	7 "/mnt/c/Users/dibak/Desktop/github_repos/cutedsl_kernels/cpp_ptx/swizzled_transpose/swizzled_transpose.h"
-	.file	8 "/mnt/c/Users/dibak/Desktop/github_repos/cutedsl_kernels/cpp_ptx/Utils.h"
+	.file	7 "/mnt/c/Users/dibak/Desktop/github_repos/kernels/cpp_ptx/swizzled_transpose/swizzled_transpose.h"
+	.file	8 "/mnt/c/Users/dibak/Desktop/github_repos/kernels/cpp_ptx/Utils.h"
 	.section	.debug_str
 	{
 $L__info_string0:
