@@ -9,6 +9,36 @@ from cutlass.cute.nvgpu import cpasync, tcgen05
 import cutlass.utils.blackwell_helpers as sm100_utils
 from cutlass.cute.runtime import from_dlpack
 
+"""
+Each CTA computes one `128 x 256` tile of `C` and walks the `K` dimension in `64`-wide chunks, so with `K=512` this CTA does `8` mainloop iterations, and each one is split into `4` UMMA steps of `K=16` because the instruction shape is `(128, 256, 16)` 
+
+**Prologue**
+The CTA first reserves on-SM storage: shared memory buffers `sA` and `sB`, pipeline barrier storage, and `512` columns of TMEM for the accumulator tile ([gemm_abstractions.py](/Users/dibakarbarua/Desktop/Code/kernels/tutorials/gemm_abstractions.py#L203), [gemm_abstractions.py](/Users/dibakarbarua/Desktop/Code/kernels/tutorials/gemm_abstractions.py#L222)). Warp 0 is the control warp here: it prefetches the TMA descriptors and later becomes the issuer for TMA and UMMA work ([gemm_abstractions.py](/Users/dibakarbarua/Desktop/Code/kernels/tutorials/gemm_abstractions.py#L234), [gemm_abstractions.py](/Users/dibakarbarua/Desktop/Code/kernels/tutorials/gemm_abstractions.py#L376)). Data-wise, the important setup is:
+- `gA` and `gB` describe this CTA’s GMEM tiles.
+- `sA` and `sB` are a 4-stage SMEM ring buffer for those tiles.
+- `tCrA` and `tCrB` are not register payloads; they are UMMA handles/descriptors telling tensor-core hardware which SMEM stage to read.
+- `tCtAcc` is rebound onto TMEM, so accumulators live in TMEM, not ordinary registers.
+
+**Mainloop**
+For each CTA K-tile, warp 0 does two things:
+1. Issues TMA copies `GMEM -> SMEM` for the next `A` and `B` tiles into stage `ab_empty.index`.
+2. Waits for that stage to become full, then issues `cute.gemm(...)` UMMA ops reading `SMEM -> tensor-core MMA path` and accumulating into `TMEM`. So the per-CTA steady-state flow is:
+
+`HBM/GMEM -> TMA engine -> SMEM ring buffer -> UMMA/tensor cores -> TMEM accumulator`
+
+**Epilogue**
+After the last UMMA commit, the whole CTA participates. The accumulator pipeline is configured so all `128` threads are consumers here. Each thread:
+- loads a slice from `TMEM -> RMEM` (`tCrAcc`, FP32),
+- converts FP32 to output type in registers (`tCrC`, FP16),
+- stores `RMEM -> GMEM` into its piece of `C`
+
+So the full CTA story is:
+
+`A/B: GMEM -> SMEM -> tensor cores`
+`Accumulation: tensor cores -> TMEM`
+`Output: TMEM -> registers -> GMEM(C)`
+"""
+
 ### Tiling Setup ###
 io_dtype = cutlass.Float16
 acc_dtype = cutlass.Float32
@@ -171,6 +201,17 @@ def host_function(
 ############ Kernel Function ########
 #####################################
 
+"""
+Nomenclature:
+t -> tensor
+gA/gB/gC/mA/mB/mC -> global memory
+tA/tB -> Tensors used by TMA
+tC -> Tensors used by MMA
+tAsA, tAgA -> TMA src/dst (s = smem, g = gmem)
+tCrA, tCrB, tCtAcc -> MMA src/dst (r = reg/smem_ptr, t = tmem)
+NOTE: In Blackwell/Hopper, we can choose to not hold operands in reg-file
+"""
+
 @cute.struct
 class SharedStorage:
     ab_mbar_ptr: cute.struct.MemRange[cutlass.Int64, ab_stages * 2]
@@ -287,6 +328,16 @@ def kernel(
     tCgB = thr_mma.partition_B(gB)
     # (MMA, MMA_M, MMA_N)
     tCgC = thr_mma.partition_C(gC)
+
+    """
+    Then make_fragment_A/B turns those logical operand tiles into UMMA operand fragments/descriptors. 
+    For tcgen05 UMMA these are not “register arrays of values”; 
+        they are handles telling the instruction which SMEM tile to read. 
+    That is why the element tile (128,16) / (256,16) disappears and you get:
+
+    tCrA: (1,1,4,4)
+    tCrB: (1,1,4,4)
+    """
     # (MMA, MMA_M, MMA_K)
     tCrA = tiled_mma.make_fragment_A(sA)
     # (MMA, MMA_N, MMA_K)
@@ -419,8 +470,11 @@ def kernel(
     # TMEM -> RMEM -> GEMM
     # Sub-tiling for better instruction-level parallelism
     for i in cutlass.range(cute.size(tDtC, mode=[2])):
+        # Load from TMEM to register
         cute.copy(tmem_tiled_copy, tDtC[None, None, i], tCrAcc)
+        # Computation
         tCrC.store(tCrAcc.load().to(io_dtype))
+        # Vectorized store
         cute.autovec_copy(tCrC, tDgC[None, None, i])
     acc_full.release()
 

@@ -14,7 +14,10 @@
 ---- Swizzling ----
 - SRAM modules in ML ASICs are usually banked at a high width (4B-16B or more) to allow high throughput access per thread/lane
 - These banks are of a fixed number (for example 32x4B banks in NVIDIA GPUs) after which the banks repeat
-- For accessing data from a single warp/SIMD operation this leads to contiguous addresses and no conflicts if all lanes access 32B
+- For accessing data from a single warp/SIMD operation this leads to contiguous addresses and no conflicts ...
+    - if all lanes access contiguous memory at 4B granularity
+    - For example if each lane accesses 8B data then we will see a 2-way bank conflict between t[0:15] and t[16:31]
+    - But our effective throughput is anyway 128B/cycle so we still achieve maximum SMEM Utilization
 - But there are two cases when ther e can be bank-conflicts:
     - Transposed Access (SIMD operations read/write strided i.e a full column)
     - Concurrent Access of different rows by different SIMD Units or FF Units (TensorCores in NVIDIA)
