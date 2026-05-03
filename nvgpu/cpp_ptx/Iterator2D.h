@@ -74,11 +74,38 @@ __device__ __forceinline__ Iterator2D<kNumWorkers>::Iterator2D(uint32_t worker_i
     this->decode_current_tile();
 }
 
-template <size_t kNumWorkers>
+/*
+CUTLASS-style FastDivMod
+Since num_tiles_x is a runtime value, the two quotient and remainder will be expensive as ...
+... the compiler will emit guards to protect against divide by zero etc.
+
+To make this commonly used div-mod operation performant, CUTLASS exposes ...
+... a FastDivMod operation that modifies the calculation to:
+
+Let N = dividend (tile_idx) and d = divisor (num_tiles_x)
+    p = 31u + ceil_log2(d)
+    m = ceil(2^p / d)
+      = (uint32_t(p << 31) + d - 1) / d
+    shift = p - 32
+
+The run-time calculations become:
+q = (d == 1) ? (__umulhi(n,m) >> shift) : d
+r = n - q * d
+
+Q: Why __umulhi() ?
+    - d >= 1
+    - Hence p >= 32
+    - Hence n * m = n * (>= 2^32) = n << 32
+    - We are guaranteed that the lower 32-bits will be zero and the product will be 64-bit
+    - On NVIDIA GPUs, ALUs are 32-bit ....
+
+m and shift can be precalculated in the host using static constexpr
+*/
+template <size_t kNumWorkers, size_t m, size_t shift>
 __device__ __forceinline__ void Iterator2D<kNumWorkers>::decode_current_tile()
 {
-    this->curr_tile_yidx = this->curr_tile_idx / this->num_tiles_x;
-    this->curr_tile_xidx = this->curr_tile_idx % this->num_tiles_x; // rem is one instruction in GPUs
+    this->curr_tile_yidx = (this->num_tiles_x == 1) ? ((uint32_t)__umulhi(this->curr_tile_idx, m) >> shift) : this->num_tiles_x;
+    this->curr_tile_xidx = this->curr_tile_idx - this->curr_tile_yidx * this->num_tiles_x;
     this->tiles_done = this->curr_tile_idx >= this->total_tiles;
 }
 
