@@ -1,4 +1,6 @@
 #pragma once
+#include <cuda.h>
+#include <cassert>
 #include <cstdint>
 #include <cstddef>
 
@@ -25,77 +27,80 @@ global metadata:
 struct Tile2D {
     uint32_t xidx;
     uint32_t yidx;
-    uint32_t xsize;
-    uint32_t ysize;
 };
 
-template <typename T, size_t kNumWorkers>
+template <size_t kNumWorkers>
 class Iterator2D
 {
+    static_assert(kNumWorkers > 0, "Iterator2D requires at least one worker.");
+
     public:
         Iterator2D() = delete;
-        Iterator2D(uint32_t worker_idx, uint32_t tsr_xsize, uint32_t tsr_ysize, uint32_t tile_xsize, uint32_t tile_ysize);
-        void set_next_tile();
-        Tile2D next();
-        bool end();
+        __device__ __forceinline__ Iterator2D(uint32_t worker_idx, uint32_t tsr_xsize, uint32_t tsr_ysize, uint32_t tile_xsize, uint32_t tile_ysize);
+        __device__ __forceinline__ Tile2D next();
+        __device__ __forceinline__ bool end();
     private:
-        uint32_t tsr_xsize;
-        uint32_t tsr_ysize;
-        uint32_t tile_xsize;
-        uint32_t tile_ysize;
         uint32_t curr_tile_idx;
         uint32_t curr_tile_xidx;
         uint32_t curr_tile_yidx;
-        uint32_t curr_xidx;
-        uint32_t curr_xsize;
-        uint32_t curr_yidx;
-        uint32_t curr_ysize;
         uint32_t num_tiles_x;
-        uint32_t num_tiles_y
-        uint32_t last_xsize;
-        uint32_t last_ysize;
+        uint32_t num_tiles_y;
+        uint32_t total_tiles;
+        uint32_t tile_xsize;
+        uint32_t tile_ysize;
         bool tiles_done;
+        __device__ __forceinline__ void decode_current_tile();
+        __device__ __forceinline__ void set_next_tile();
 };
 
-template <typename T, size_t kNumWorkers>
-Iterator2D<T, kNumWorkers>::Iterator2D(uint32_t worker_idx, uint32_t tsr_xsize, uint32_t tsr_ysize, uint32_t tile_xsize, uint32_t tile_ysize)
+template <size_t kNumWorkers>
+__device__ __forceinline__ Iterator2D<kNumWorkers>::Iterator2D(uint32_t worker_idx, uint32_t tsr_xsize, uint32_t tsr_ysize, uint32_t tile_xsize, uint32_t tile_ysize)
 {
-    tsr_xsize = tsr_xsize;
-    tsr_ysize = tsr_ysize;
-    tile_xsize = tile_xsize;
-    tile_ysize = tile_ysize;
-    num_tiles_x = (tsr_xsize + xsize - 1) / xsize;
-    last_xsize = tsr_xsize % xsize; // rem is one instruction in GPUs
-    num_tiles_y = (tsr_ysize + ysize - 1) / ysize;
-    last_ysize = tsr_ysize - (num_tiles_y - 1) * ysize;
-    curr_tile_idx = 0;
-    set_next_tile();
+    // This is a linearized iterator, kernel should launch using a 1D grid.
+    assert(blockDim.y == 1);
+    assert(blockDim.z == 1);
+    assert(gridDim.y == 1);
+    assert(gridDim.z == 1);
+    assert(tile_xsize > 0);
+    assert(tile_ysize > 0);
+
+    uint32_t const raw_num_tiles_x = (tsr_xsize + tile_xsize - 1) / tile_xsize;
+    this->num_tiles_y = (tsr_ysize + tile_ysize - 1) / tile_ysize;
+    this->num_tiles_x = raw_num_tiles_x > 0 ? raw_num_tiles_x : 1;
+    this->total_tiles = raw_num_tiles_x * this->num_tiles_y;
+    this->tile_xsize = tile_xsize;
+    this->tile_ysize = tile_ysize;
+    this->curr_tile_idx = worker_idx;
+    this->decode_current_tile();
 }
 
-template<typename T, size_t kNumWorkers>
-void Iterator2D<T, kNumWorkers>::set_next_tile()
+template <size_t kNumWorkers>
+__device__ __forceinline__ void Iterator2D<kNumWorkers>::decode_current_tile()
 {
-    curr_tile_idx += worker_idx;
-    curr_tile_yidx = curr_tile_idx / num_tiles_x;
-    curr_tile_xidx = curr_tile_idx % num_tiles_x; // rem is one instruction in GPUs
-    curr_xsize = (curr_tile_xidx == num_tiles_x - 1) ? tile_xsize : last_xsize;
-    curr_ysize = (curr_tile_yidx == num_tiles_y - 1) ? tile_ysize : last_ysize;
-    curr_xidx = curr_tile_xidx * tile_xsize;
-    curr_yidx = curr_tile_yidx * tile_ysize;
-    tiles_done = curr_tile_idx < num_tiles_x * num_tiles_y;
+    this->curr_tile_yidx = this->curr_tile_idx / this->num_tiles_x;
+    this->curr_tile_xidx = this->curr_tile_idx % this->num_tiles_x; // rem is one instruction in GPUs
+    this->tiles_done = this->curr_tile_idx >= this->total_tiles;
 }
 
-template<typename T, size_t kNumWorkers>
-bool Iterator2D<T, kNumWorkers>::end()
+template <size_t kNumWorkers>
+__device__ __forceinline__ void Iterator2D<kNumWorkers>::set_next_tile()
 {
-    return tiles_done;
+    this->curr_tile_idx += kNumWorkers;
+    this->decode_current_tile();
 }
 
-template<typename T, size_t kNumWorkers>
-Tile2D Iterator2D<T, kNumWorkers>::next()
+template <size_t kNumWorkers>
+__device__ __forceinline__ bool Iterator2D<kNumWorkers>::end()
 {
-    assert(!tiles_done);
-    Tile2D tile{curr_xidx, curr_yidx, curr_size, curr_ysize};
-    set_next_tile();
+    return this->tiles_done;
+}
+
+template <size_t kNumWorkers>
+__device__ __forceinline__ Tile2D Iterator2D<kNumWorkers>::next()
+{
+    assert(!this->tiles_done);
+    Tile2D tile{this->curr_tile_xidx * this->tile_xsize,
+                this->curr_tile_yidx * this->tile_ysize};
+    this->set_next_tile();
     return tile;
 }
