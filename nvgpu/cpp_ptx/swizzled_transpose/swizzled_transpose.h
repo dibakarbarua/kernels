@@ -24,30 +24,148 @@
 
 There are two primary methods of solving this issue:
     - padding by one bank in x-dim to force rotation on strides
-    - Swizzling addresses as they cross stride boundaries
+    - Swizzling addresses as they cross stride boundaries (32x4=128B on nvgpu)
 
 Swizzling an SMEM address space (by NVIDIA)
 NVIDIA published an (awesome) Swizzle Functor with their Cutlass 3.0 release.
 - It basically has three aspects: MBase, SShift and BBits.
 - The idea is to inject higher order bits into lower order bits so that strided addresses 
-... (which have common lower order bits) do not collide when mapped to a small address space (such as 32x32B banks)
+... (which have common lower order bits) do not collide when mapped to a small address space 
+... (such as 32x32B banks tile-size)
 
-address = | ---------------------------------- <--- B-bits ----> ------------|
-   mask = | -------- <--- B-bits ----> ------- <--- B-bits ----> ------------|
+address = | ---------------------------------- <--- B-bits ----> ------------| (original address)
+   mask = | -------- <--- B-bits ----> ------- <--- B-bits ----> ------------| (XORed with mask)
           | -------------------------< ----- SShift ---------- ><---MBase--->|
 
-The B-Bits in the original address (starting at MBase) will be XOR'ed with the shifted B-bits from higher-bits (starting at SShift + MBase)
+Addresses at 4B per lane (M=2):
+
+--- Row0 ---
+    (no masking)
+    [... 0 (row0) ] [0 0 0 0 0 0 0] -> lane0, addr=0 (sb0)
+    [... 0 (row0) ] [0 0 0 0 1 0 0] -> lane1, addr=4 (sb1)
+    [... 0 (row0) ] [0 0 0 1 0 0 0] -> lane2, addr=8 (sb2)
+    [... 0 (row0) ] [0 0 0 1 1 0 0] -> lane3, addr=12 (sb3)
+    [... 0 (row0) ] [0 0 1 0 0 0 0] -> lane4, addr=16 (sb4)
+    [... 0 (row0) ] [0 0 1 0 1 0 0] -> lane5, addr=20 (sb5)
+    [... 0 (row0) ] [0 0 1 1 0 0 0] -> lane6, addr=24 (sb6)
+    [... 0 (row0) ] [0 0 1 1 1 0 0] -> lane7, addr=28 (sb7)
+    ....
+    [... 0 (row0) ] [1 1 1 1 1 0 0] -> lane31, addr=124 (sb31)
+
+--- Row1 ---
+    [... 1 (row1) ] [0 0 0 0 0 0 0] -> lane0, (sb0)
+    [............ ] [0 0 0 0 1 0 0] -> mask S (M=2, S=5)
+    [... 1 (row1) ] [0 0 0 0 1 0 0] -> swizzled lane0, (sb1)
+    [... 1 (row1) ] [0 0 0 0 1 0 0] -> lane1, (sb1)
+    [............ ] [0 0 0 0 1 0 0] -> mask S (M=2, S=5)
+    [... 1 (row1) ] [0 0 0 0 0 0 0] -> swizzled lane1, (sb0)
+    [... 1 (row1) ] [0 0 0 1 0 0 0] -> lane2, (sb2)
+    [............ ] [0 0 0 0 1 0 0] -> mask S (M=2, S=5)
+    [... 1 (row1) ] [0 0 0 1 1 0 0] -> swizzled lane0, (sb3)
+    [... 1 (row1) ] [0 0 0 1 1 0 0] -> lane3, (sb0)
+    [............ ] [0 0 0 0 1 0 0] -> mask S (M=2, S=5)
+    [... 1 (row1) ] [0 0 0 1 0 0 0] -> swizzled lane3, (sb2)
+    ....
+    < we can clearly see every consecutive lane-pair exchanges sub-banks>
+
+--- Row2 ---
+    [.. 10 (row1) ] [0 0 0 0 0 0 0] -> lane0, (sb0)
+    [............ ] [0 0 0 1 0 0 0] -> mask S (M=2, S=5)
+    [.. 10 (row1) ] [0 0 0 1 0 0 0] -> swizzled lane0, (sb4)
+    [.. 10 (row1) ] [0 0 0 0 1 0 0] -> lane1, (sb1)
+    [............ ] [0 0 0 1 0 0 0] -> mask S (M=2, S=5)
+    [.. 10 (row1) ] [0 0 0 1 1 0 0] -> swizzled lane0, (sb5)
+    [.. 10 (row1) ] [0 0 0 1 0 0 0] -> lane2, (sb2)
+    [............ ] [0 0 0 1 0 0 0] -> mask S (M=2, S=5)
+    [.. 10 (row1) ] [0 0 0 0 0 0 0] -> swizzled lane0, (sb0)
+    [.. 10 (row1) ] [0 0 0 1 1 0 0] -> lane3, (sb3)
+    [............ ] [0 0 0 1 0 0 0] -> mask S (M=2, S=5)
+    [.. 10 (row1) ] [0 0 0 0 1 0 0] -> swizzled lane0, (sb1)
+    [.. 10 (row1) ] [0 0 1 0 0 0 0] -> lane4, (sb4)
+    [............ ] [0 0 0 1 0 0 0] -> mask S (M=2, S=5)
+    [.. 10 (row1) ] [0 0 1 1 0 0 0] -> swizzled lane0, (sb6)
+    ....
+    < we can clearly see every consecutive 2-apart-lane-pair exchanges sub-banks>
+
+Addresses at 16B per lane (M=4):
+For 4B per-lane addresses with M=4, S=3:
+
+--- Row0 ---
+    (no masking)
+    [... 0 (row0) ] [0 0 0 0 0 0 0] -> lane0, addr=0 (sb0)
+    [... 0 (row0) ] [0 0 0 0 1 0 0] -> lane1, addr=4 (sb1)
+    [... 0 (row0) ] [0 0 0 1 0 0 0] -> lane2, addr=8 (sb2)
+    [... 0 (row0) ] [0 0 0 1 1 0 0] -> lane3, addr=12 (sb3)
+    [... 0 (row0) ] [0 0 1 0 0 0 0] -> lane4, addr=16 (sb4)
+    [... 0 (row0) ] [0 0 1 0 1 0 0] -> lane5, addr=20 (sb5)
+    [... 0 (row0) ] [0 0 1 1 0 0 0] -> lane6, addr=24 (sb6)
+    [... 0 (row0) ] [0 0 1 1 1 0 0] -> lane7, addr=28 (sb7)
+    ....
+    [... 0 (row0) ] [1 1 1 1 1 0 0] -> lane31, addr=124 (sb31)
+
+--- Row1 ---
+    [... 1 (row1) ] [0 0 0 0 0 0 0] -> lane0, (sb0)
+    [............ ] [0 0 1 0 0 0 0] -> mask S (M=4, S=3)
+    [... 1 (row1) ] [0 0 1 0 0 0 0] -> swizzled lane0, (sb4)
+    [... 1 (row1) ] [0 0 0 0 1 0 0] -> lane1, (sb1)
+    [............ ] [0 0 1 0 0 0 0] -> mask S (M=4, S=3)
+    [... 1 (row1) ] [0 0 1 0 1 0 0] -> swizzled lane1, (sb5)
+    [... 1 (row1) ] [0 0 0 1 0 0 0] -> lane2, (sb2)
+    [............ ] [0 0 1 0 0 0 0] -> mask S (M=4, S=3)
+    [... 1 (row1) ] [0 0 1 1 0 0 0] -> swizzled lane2, (sb6)
+    [... 1 (row1) ] [0 0 0 1 1 0 0] -> lane3, (sb3)
+    [............ ] [0 0 1 0 0 0 0] -> mask S (M=4, S=3)
+    [... 1 (row1) ] [0 0 1 1 1 0 0] -> swizzled lane3, (sb7)
+    [... 1 (row1) ] [0 0 1 0 0 0 0] -> lane4, (sb4)
+    [............ ] [0 0 1 0 0 0 0] -> mask S (M=4, S=3)
+    [... 1 (row1) ] [0 0 0 0 0 0 0] -> swizzled lane4, (sb0)
+    ....
+    < we can clearly see every consecutive 4-lane group exchanges sub-banks>
+
+--- Row2 ---
+    [.. 10 (row2) ] [0 0 0 0 0 0 0] -> lane0, (sb0)
+    [............ ] [0 1 0 0 0 0 0] -> mask S (M=4, S=3)
+    [.. 10 (row2) ] [0 1 0 0 0 0 0] -> swizzled lane0, (sb8)
+    [.. 10 (row2) ] [0 0 0 0 1 0 0] -> lane1, (sb1)
+    [............ ] [0 1 0 0 0 0 0] -> mask S (M=4, S=3)
+    [.. 10 (row2) ] [0 1 0 0 1 0 0] -> swizzled lane1, (sb9)
+    [.. 10 (row2) ] [0 0 0 1 0 0 0] -> lane2, (sb2)
+    [............ ] [0 1 0 0 0 0 0] -> mask S (M=4, S=3)
+    [.. 10 (row2) ] [0 1 0 1 0 0 0] -> swizzled lane2, (sb10)
+    [.. 10 (row2) ] [0 0 0 1 1 0 0] -> lane3, (sb3)
+    [............ ] [0 1 0 0 0 0 0] -> mask S (M=4, S=3)
+    [.. 10 (row2) ] [0 1 0 1 1 0 0] -> swizzled lane3, (sb11)
+    [.. 10 (row2) ] [0 0 1 0 0 0 0] -> lane4, (sb4)
+    [............ ] [0 1 0 0 0 0 0] -> mask S (M=4, S=3)
+    [.. 10 (row2) ] [0 1 1 0 0 0 0] -> swizzled lane4, (sb12)
+    ....
+    < we can clearly see every consecutive 8-lane group exchanges sub-banks>
+
+    
+
+The B-Bits in the original address (starting at MBase) will be XOR'ed with the shifted B-bits from higher-bits 
+(starting at SShift + MBase)
 - Hence addresses will retain their original addressing for 2^(M+S) Bytes
     - This is the size of one SMEM row, as we can keep this unchanged as the banks rotate by nature every 4B
 - After 2^(M+S) bytes, we will toggle the bits starting at MBase.
 - MBase helps use define how many Bytes we wish to be contiguous and hence not rotated in-between
-    - This will be dictated by how many bytes are access per SIMD/SIMT lane that should be contiguous
+    - This will be dictated by how many bytes are accessed per SIMD/SIMT lane that should be contiguous
     - The maximum size of a Load per Lane in NVIDIA GPUs is 16B, hence MBase = 4.
 - For 16B per lane and 32 lanes we get SMEM row = 512B, hence 2^(M+S) = 9. Hence S = 5.
 - For  4B per lane and 32 lanes we get SMEM row = 128B, hence 2^(M+S) = 7. Hence S = 3.
 Hence, 2^(M+S) covers one SMEM row and for 2^B rows we keep swizzling addresses.
-Hence number of rows = 2^B
+Hence number of rows = 2^B as this is the total number of rows we need to rotate once-per-row for.
 For a 32x32 transpose of 4B elements, 2^B = 32 and B = 5.
+
+Q: Why M=4?
+The advantage of M=4 is future-proofing and compatibility with wider per-lane operations:
+
+    M=2  -> preserve 4B contiguous regions
+    M=3  -> preserve 8B contiguous regions
+    M=4  -> preserve 16B contiguous regions
+    So with M=4, lane-local 16B vectors remain naturally aligned and contiguous. 
+    That matters for things like cp.async 16B transactions, vectorized SMEM loads/stores, 
+    or any later path where each lane moves multiple adjacent 4B elements at once.
 
 For our case, we can plan for 16B access per lane and multiples of 32 rows per SMEM allocation.
 Hence,
@@ -74,6 +192,7 @@ We can see that on column-read one SIMD/SIMT operation will read contiguous dest
 ....
 If we read this column-wise 4B per lane, we get e0,0 e0,1 e1,0 e1,1 which is incorrect
 Here each lane will have to do a 2x2 transpose within it's 2 registers holding e0,0 e0,1 (4B) and e1,0 e1,1 (4B)
+2 x `prmt.b32{.mode}  d, a, b, c;` instructions
 
 --- 128x128x1B ---
 [ e0,0|e0,1|e0,2|e0,3(4B)  ....... e0,28|e0,29|e0,30|e0,31(4B) ]
@@ -82,6 +201,7 @@ Here each lane will have to do a 2x2 transpose within it's 2 registers holding e
 [ e3,0|e3,1|e3,2|e3,3(4B) ........ e3,28|e3,29|e3,30|e3,31(4B) ]
 ....
 Here each lane will have to do a 4x4 transpose within it's 4 registers
+4 x `prmt.b32{.mode}  d, a, b, c;` instructions
 */
 
 /*
