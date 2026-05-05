@@ -21,6 +21,24 @@ using cpp_ptx::utils::make_zero_f16x2;
 using cpp_ptx::utils::store_to_global;
 
 /*
+---- READ THIS FIRST ----
+There are several issues with this kernel.
+- First we need to decide if we want to stage our single iteration tiles in RMEM or SMEM
+- We are using `cp.async` instructions for both A and B meaning both go in SMEM
+- But we are using FMAD instructions which require operands in registers!
+- This means we are storing redundant data in RMEM and SMEM (for A and B) ... 
+    with the added issue that we need to hide SMEM load latency for both A and B
+- The pipelining for hiding GMEM latency is incorrect
+- The tensor indexing looks off?
+
+--- Rules of Thumb ---
+- Async copy instructions (like TMA) are useful if at least one of the instruction's operands
+    can be in SMEM (like UMMA)
+- For elementwise/reduction only operators (no GEMM) LD/ST might be better.... as no need to hide
+    SMEM -> RMEM latency. (We are storing redundant data in RMEM and SMEM!)
+*/
+
+/*
 ----- Batched GEMV Operation to simulate Attention-Decode Kernels ------
 Workload:
 - We simulate token-by-token decode for LLM(s) using a simulated GEMV
