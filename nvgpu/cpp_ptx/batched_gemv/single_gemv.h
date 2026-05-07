@@ -9,12 +9,11 @@
 
 #include "Utils.h"
 
-template <typename T, size_t kUnroll = 2, size_t K = 128 /*hidden-dim*/, size_t kWarpTileN = 64 /* for coalesced writes for C */>
-__global__ __launch_bounds__(512) gemv(
-    int M,
+template <size_t kUnroll = 2, kUnrollAlu = 2, size_t K = 128 /*hidden-dim*/, size_t kWarpTileN = 64 /* for coalesced writes for C */>
+__global__ __launch_bounds__(128) gemv(
     int N,
     const __half* g_A, // [1, K]
-    const __half* g_B, // [K, N]
+    const __half* g_B, // [N, K]
     half* C,
 )
 {
@@ -33,7 +32,7 @@ __global__ __launch_bounds__(512) gemv(
     // Fast-reg lookups
     auto warp_idx = threadIdx.x / 32;
     auto cta_idx = blockIdx.x;
-    auto num_warps = blockDim.x;
+    auto num_warps = blockDim.x / 32;
     auto num_ctas = griDim.x;
     auto lane_idx = threadIdx.x & 31;
     
@@ -42,7 +41,7 @@ __global__ __launch_bounds__(512) gemv(
     r_A = static_cast<const int2*>(g_A + lane_idx * 4);
 
     // Tensor movement
-    uint32_t ROW_SIZE = K * sizeof(__half);
+    uint32_t ROW_SIZE = K;
     uint32_t WARP_TILE_SIZE = kWarpTileN * row_size;
     uint32_t CTA_TILE_SIZE = num_warps * WARP_TILE_SIZE;
 
@@ -56,7 +55,7 @@ __global__ __launch_bounds__(512) gemv(
     // and for ensuring coalesced stores despite tensor contraction
     // kWarpTileN * kUnroll rows will be prefetched
 #pragma unroll
-    for (auto unr = 0; unr < kUnroll - 1; unr++) {
+    for (auto unr = 0; unr < kUnroll; unr++) {
 #pragma unroll 
         for (auto n = 0; n < kWarpTileN; n++) {
             auto g_Bload = g_Bcurr + (
@@ -71,34 +70,69 @@ __global__ __launch_bounds__(512) gemv(
     g_Bstart += kUnroll * CTA_TILE_SIZE
 
     uint32_t rd_ptr = 0;
-    uint32_t wr_ptr = kUnroll - 1;
+    uint32_t wr_ptr = 0;
     /* ----- Main Loop ----- */
     for (; g_Bcurr < (g_B + N); g_Bcurr += g_Bstep) {
         /* compute */
 #pragma unroll
-        for (auto n = 0; n < kWarpTileN; n++) {
+        for (auto n = 0; n < kWarpTileN; n += kUnrollAlu) {
             // Each iteration we compute on fp16x2 elements per instruction
+            __half2 out[kUnrollAlu][2];
+
+            // Packed float2 multiplies
 #pragma unroll
-            // iter[i] = A[1,K] @ B[K,1] -> C[i], C[i+1]
-            for (auto k = 0; k < K/64; k += 1) {
-                ___half2 fma_out;
-                fma_out = __hfma2(r_A[k], r_B[rd_ptr][n][k])
-                // reduce across lanes, write to register of correct lane.
-#pragma unroll                
-                for(auto offset = 16; offset >= 1; offset >>= 1) {
-                    fma_out += __shfl_xor_sync(0xffffffffu, fma_out, offset);
-                }
-                // kWarpTileN == 128 for this to be possible.
+            for (auto unr = 0; unr < kUnrollAlu; unr++) {
+                // iter[i] = A[1,K] @ B[K,1] -> C[i], C[i+1]
+                out[unr][0] = __hmul(r_A[0], r_B[rd_ptr][n + unr][0]);
+                out[unr][1] = __hmul(r_A[1], r_B[rd_ptr][n + unr][1]);
+            }
+
+            // fully unrolled bfly shuffle(s) for independent rows
+#pragma unroll
+            for (auto unr = 0; unr < kUnrollAlu; unr++) {            
+                out[unr][0] += __shfl_xor_sync(0xffffffffu, out[unr][0], 16);
+                out[unr][1] += __shfl_xor_sync(0xffffffffu, out[unr][1], 16);
+            }
+
+#pragma unroll
+            for (auto unr = 0; unr < kUnrollAlu; unr++) {            
+                out[unr][0] += __shfl_xor_sync(0xffffffffu, out[unr][0], 8);
+                out[unr][1] += __shfl_xor_sync(0xffffffffu, out[unr][1], 8);
+            }
+
+#pragma unroll
+            for (auto unr = 0; unr < kUnrollAlu; unr++) {            
+                out[unr][0] += __shfl_xor_sync(0xffffffffu, out[unr][0], 4);
+                out[unr][1] += __shfl_xor_sync(0xffffffffu, out[unr][1], 4);
+            }
+
+#pragma unroll
+            for (auto unr = 0; unr < kUnrollAlu; unr++) {            
+                out[unr][0] += __shfl_xor_sync(0xffffffffu, out[unr][0], 2);
+                out[unr][1] += __shfl_xor_sync(0xffffffffu, out[unr][1], 2);
+            }
+
+#pragma unroll
+            for (auto unr = 0; unr < kUnrollAlu; unr++) {            
+                out[unr][0] += __shfl_xor_sync(0xffffffffu, out[unr][0], 1);
+                out[unr][1] += __shfl_xor_sync(0xffffffffu, out[unr][1], 1);
+            }
+                
+#pragma unroll
+            for (auto unr = 0; unr < kUnrollAlu; unr++) { 
+                // kWarpTileN == 64 for this to be possible.
                 // needs to be masked/predicated instruction
-                if ((n / 32) == lane_idx) {
-                    r_C[n % 2][k] = fma_out;
+                if (((n + unr) / 2) == lane_idx) {
+                    r_C[(n + unr) % 2][0] = out[unr][0];
+                    r_C[(n + unr) % 2][1] = out[unr][1];
                 }
             }
         }
         
         /* store */
-        // fully coalesced 256B / 128 elements per warp iff kWarpTileN = 128
-        *(reinterpret_cast<int2*>(g_Ccurr + lane_idx * 4)) = *(reinterpret_cast<int2*>(r_C));
+        // fully coalesced 128B / 64 elements per warp iff kWarpTileN = 128
+        __half2 dpr_val = {r_C[0].x + r_C[0].y, r_C[1].x + r_C[1].y};
+        *(reinterpret_cast<int2*>(g_Ccurr + warp_idx * kWarpTileN + lane_idx * 4)) = *(reinterpret_cast<int2*>(&dpr_val));
 
         /* load next CTA tile */
 #pragma unroll 
@@ -123,20 +157,54 @@ __global__ __launch_bounds__(512) gemv(
 #pragma unroll
         for (auto n = 0; n < kWarpTileN; n++) {
             // Each iteration we compute on fp16x2 elements per instruction
+            __half2 out[kUnrollAlu][2];
+
+            // Packed float2 multiplies
 #pragma unroll
-            // iter[i] = A[1,K] @ B[K,1] -> C[i], C[i+1]
-            for (auto k = 0; k < K/64; k += 1) {
-                ___half2 fma_out;
-                fma_out = __hfma2(r_A[k], r_B[rd_ptr][n][k])
-                // reduce across lanes, write to register of correct lane.
-#pragma unroll                
-                for(auto offset = 16; offset >= 1; offset >>= 1) {
-                    fma_out += __shfl_xor_sync(0xffffffffu, fma_out, offset);
-                }
-                // kWarpTileN == 128 for this to be possible.
+            for (auto unr = 0; unr < kUnrollAlu; unr++) {
+                // iter[i] = A[1,K] @ B[K,1] -> C[i], C[i+1]
+                out[unr][0] = __hmul(r_A[0], r_B[rd_ptr][n + unr][0]);
+                out[unr][1] = __hmul(r_A[1], r_B[rd_ptr][n + unr][1]);
+            }
+
+            // fully unrolled bfly shuffle(s) for independent rows
+#pragma unroll
+            for (auto unr = 0; unr < kUnrollAlu; unr++) {            
+                out[unr][0] += __shfl_xor_sync(0xffffffffu, out[unr][0], 16);
+                out[unr][1] += __shfl_xor_sync(0xffffffffu, out[unr][1], 16);
+            }
+
+#pragma unroll
+            for (auto unr = 0; unr < kUnrollAlu; unr++) {            
+                out[unr][0] += __shfl_xor_sync(0xffffffffu, out[unr][0], 8);
+                out[unr][1] += __shfl_xor_sync(0xffffffffu, out[unr][1], 8);
+            }
+
+#pragma unroll
+            for (auto unr = 0; unr < kUnrollAlu; unr++) {            
+                out[unr][0] += __shfl_xor_sync(0xffffffffu, out[unr][0], 4);
+                out[unr][1] += __shfl_xor_sync(0xffffffffu, out[unr][1], 4);
+            }
+
+#pragma unroll
+            for (auto unr = 0; unr < kUnrollAlu; unr++) {            
+                out[unr][0] += __shfl_xor_sync(0xffffffffu, out[unr][0], 2);
+                out[unr][1] += __shfl_xor_sync(0xffffffffu, out[unr][1], 2);
+            }
+
+#pragma unroll
+            for (auto unr = 0; unr < kUnrollAlu; unr++) {            
+                out[unr][0] += __shfl_xor_sync(0xffffffffu, out[unr][0], 1);
+                out[unr][1] += __shfl_xor_sync(0xffffffffu, out[unr][1], 1);
+            }
+                
+#pragma unroll
+            for (auto unr = 0; unr < kUnrollAlu; unr++) { 
+                // kWarpTileN == 64 for this to be possible.
                 // needs to be masked/predicated instruction
-                if ((n / 32) == lane_idx) {
-                    r_C[n % 2][k] = fma_out;
+                if (((n + unr) / 2) == lane_idx) {
+                    r_C[(n + unr) % 2][0] = out[unr][0];
+                    r_C[(n + unr) % 2][1] = out[unr][1];
                 }
             }
         }
