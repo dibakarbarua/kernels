@@ -118,6 +118,22 @@ __global__ void mma_cpasync_kernel(const T *__restrict__ A, const T *__restrict_
     constexpr int nbK = bK / sizeof(float4) * sizeof(T); // K-major 64 / 8 = 8
     constexpr int nbN = bN / sizeof(float4) * sizeof(T); // N-major 128 / 8 = 16
 
+    /*
+     * There are two different K granularities in this mainloop:
+     *
+     *   1. bK-wide CTA tiles, moved from global memory to shared memory
+     *      with cp.async.  In the 128x128x64 launch path this is K=64.
+     *
+     *   2. 16-wide MMA slices inside each bK tile, consumed by
+     *      mma.sync.aligned.m16n8k16.  With bK=64 there are four
+     *      tensor-core K steps per global/shared K tile.
+     *
+     * k_tile_next is the next bK-wide global K tile to issue through
+     * cp.async.  k_tile_count starts as the number of real bK tiles, then
+     * becomes the number of real cp.async issues still left after the
+     * prologue.  During the tail it is allowed to go negative so the
+     * already-prefetched tiles can drain through the compute pipeline.
+     */
     int k_tile_count = (K + bK - 1) / bK;
     int k_tile_next = 0;
 
@@ -136,6 +152,23 @@ __global__ void mma_cpasync_kernel(const T *__restrict__ A, const T *__restrict_
     int ldsm_row = lane_id % 16;
     int ldsm_col = lane_id / 16;
 
+    /*
+     * Copy one full bK-wide CTA tile of A and B from global memory to one
+     * shared-memory pipe stage.
+     *
+     * For the fast path:
+     *   A tile: 128 x 64 halfs = 16 KB
+     *   B tile:  64 x 128 halfs = 16 KB
+     *
+     * The CTA has 128 threads.  Each thread issues eight 16-byte cp.async
+     * operations for A and eight 16-byte cp.async operations for B, so the
+     * whole CTA cooperatively moves one complete A/B K tile into shared.
+     *
+     * The shared-memory column is XOR-swizzled with row % 8 when the tile is
+     * written.  ldmatrix_load below applies the same swizzle when reading.
+     * This is independent of the C-tile warp ownership; it is the A/B shared
+     * layout chosen to make ldmatrix accesses bank-friendly.
+     */
     auto cp_async_load = [&](T *tile_sA, const T *tile_gA, T *tile_sB, const T *tile_gB)
     {
 #pragma unroll
@@ -154,7 +187,19 @@ __global__ void mma_cpasync_kernel(const T *__restrict__ A, const T *__restrict_
         }
     };
 
-    // prefetch
+    /*
+     * cp.async prologue.
+     *
+     * Shared memory is a circular buffer with NumPipe stages.  We initially
+     * launch NumPipe-1 global-to-shared copies before doing any MMA work:
+     *
+     *   pipe 0 <- K tile 0
+     *   pipe 1 <- K tile 1        // when NumPipe == 3
+     *
+     * This gives the first tile time to arrive before we load it with
+     * ldmatrix, and leaves a spare pipe for the next tile that will be issued
+     * during the first compute iteration.
+     */
 #pragma unroll
     for (int k_pipe = 0; k_pipe < NumPipe - 1; ++k_pipe)
     {
@@ -172,17 +217,40 @@ __global__ void mma_cpasync_kernel(const T *__restrict__ A, const T *__restrict_
         }
     }
 
+    /*
+     * smem_pipe_read names the oldest pipe that will be consumed next by
+     * ldmatrix.  smem_pipe_write names the free pipe that can receive the
+     * next global K tile through cp.async.
+     */
     int smem_pipe_read = 0;
     int smem_pipe_write = NumPipe - 1;
 
     auto tile_sA = sA + smem_pipe_read * bM * bK;
     auto tile_sB = sB + smem_pipe_read * bN * bK;
 
+    /*
+     * For NumPipe=3 this is cp.async.wait_group 1: all but the newest one
+     * committed async-copy group must be complete.  After the prologue, that
+     * makes pipe 0 safe to read while pipe 1 may still be in flight.
+     */
     cp_async_wait<NumPipe - 2>();
     __syncthreads();
 
     auto ldmatrix_load = [&](T *tile_sA, T *tile_sB, int k_step, int reg_idx)
     {
+        /*
+         * Load one 16-wide MMA K slice from the current shared-memory tile
+         * into one of the two register stages.
+         *
+         * k_step is local to the bK tile:
+         *   0, 1, 2, 3 when bK == 64.
+         *
+         * reg_idx is either 0 or 16.  reg_a/reg_b are double-buffered:
+         * while mma_sync consumes one half, ldmatrix writes the other half
+         * with the next K slice.  The same XOR swizzle used by cp_async_load
+         * is applied here so ldmatrix reads the physical shared layout that
+         * was written by the global-load path.
+         */
         int ldsm_a_row = ldsm_row + warp_row * 16;
         int ldsm_a_col = ldsm_col + k_step * 2;
         int ldsm_a_col_sw = (ldsm_a_row % 8) ^ ldsm_a_col;
@@ -204,11 +272,30 @@ __global__ void mma_cpasync_kernel(const T *__restrict__ A, const T *__restrict_
         }
     };
 
-    // prefetch smem to rmem
+    /*
+     * ldmatrix prologue: preload K-slice 0 of the first shared-memory tile
+     * into register stage 0.  The mainloop will immediately preload K-slice
+     * 1 into register stage 1 before computing slice 0.
+     */
     ldmatrix_load(tile_sA, tile_sB, 0, 0);
 
     constexpr int block_bK = bK / 16;
 
+    /*
+     * Main K loop.
+     *
+     * The outer while advances in bK-wide global/shared tiles.  The inner
+     * unrolled tk loop advances through the four 16-wide tensor-core K slices
+     * inside that tile:
+     *
+     *   while iteration: one 64-wide global/shared K tile
+     *   tk iteration:    one 16-wide mma.sync K slice
+     *
+     * k_tile_count intentionally runs below zero during the tail.  The
+     * negative iterations are not new real global K tiles; they drain the
+     * NumPipe-1 tiles that were already launched by cp.async but still need
+     * to be consumed by ldmatrix/mma.
+     */
     while (k_tile_count > -(NumPipe - 1))
     {
 
@@ -217,6 +304,17 @@ __global__ void mma_cpasync_kernel(const T *__restrict__ A, const T *__restrict_
         {
             if (tk == block_bK - 1)
             {
+                /*
+                 * The next ldmatrix prefetch will wrap from tk=3 back to
+                 * tk_next=0.  That tk_next=0 belongs to the next bK-wide
+                 * shared-memory tile, so switch the shared-memory read pipe
+                 * before issuing that ldmatrix.
+                 *
+                 * We wait here, at the end of the current tile, rather than
+                 * at the start of the next outer iteration.  The final MMA of
+                 * the current tile still has enough work to overlap with the
+                 * ldmatrix preload of the next tile's first K slice.
+                 */
                 tile_sA = sA + smem_pipe_read * bM * bK;
                 tile_sB = sB + smem_pipe_read * bN * bK;
                 cp_async_wait<NumPipe - 2>();
@@ -225,11 +323,37 @@ __global__ void mma_cpasync_kernel(const T *__restrict__ A, const T *__restrict_
 
             int tk_next = (tk + 1) % block_bK;
             int reg_idx = (tk_next & 1) * 16;
+            /*
+             * Register-level software pipeline:
+             *
+             *   ldmatrix_load(..., tk_next, next_register_stage)
+             *   mma_sync(..., tk)
+             *
+             * mma_sync uses register stage (tk & 1), while ldmatrix writes
+             * stage (tk_next & 1).  Thus the shared-to-register load for the
+             * next MMA slice is overlapped with the tensor-core work for the
+             * current slice.
+             */
             ldmatrix_load(tile_sA, tile_sB, tk_next, reg_idx);
             mma_sync(m_size, n_size, reg_a, reg_b, reg_c, tk);
 
             if (tk == 0)
             {
+                /*
+                 * Global-memory software pipeline:
+                 *
+                 * Once the current bK tile has started computing, the pipe
+                 * that was just vacated by ldmatrix can be reused for a
+                 * future global K tile.  For NumPipe=3, a tile issued here
+                 * will not be needed until roughly two outer-loop iterations
+                 * later, giving cp.async time to cover global-memory latency.
+                 *
+                 * In the tail, k_tile_next stops advancing when no real K
+                 * tiles remain.  The unconditional cp.async can therefore
+                 * duplicate the final valid tile while the pipeline drains.
+                 * This keeps the steady-state loop branch-light; the
+                 * duplicate tail copies are not consumed as new K work.
+                 */
                 auto tile_gA = gA + k_tile_next * bK;
                 auto tile_sA = sA + smem_pipe_write * bM * bK;
                 auto tile_gB = gB + k_tile_next * bK * N;
