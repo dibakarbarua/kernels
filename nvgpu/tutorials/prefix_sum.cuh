@@ -1,6 +1,7 @@
 #pragma once
 
 #include <cstddef>
+#include <cstdint>
 #include <cuda.h>
 
 /*
@@ -72,25 +73,26 @@ Only one thread can perform spin-lock while other's wait at barrier
 TBD .....
 */
 
-template <typename T, size_t ELEMS_PER_THREAD, size_t STAGES_PER_WARP = 1>
+template <typename T, size_t ELEMS_PER_THREAD, size_t BLOCK_DIM = 256, size_t STAGES_PER_WARP = 1>
 __global__ void scan_kernel(
     T* const g_input,
     T* g_output,
-    T* g_prefix_sum,
-    bool* g_block_ready
+    volatile T* g_prefix_sum,
+    volatile bool* g_block_ready
 ) {
+    static_assert(BLOCK_DIM > 0);
+    static_assert(ELEMS_PER_THREAD > 0);
+
     // Workload sizing
     // assert that no y-division partitions
-    auto GRID_DIM = gridDim.x;
     auto block_idx = blockIdx.x;
-    auto BLOCK_DIM = blockDim.x; 
-    uint32_t const WARP_DIM = 32;
-    auto NUM_WARPS = BLOCK_DIM / WARP_DIM;
     auto tidx = threadIdx.x;
-    auto widx = threadIdx.x / WARP_DIM;
-    auto lane_idx = threadIdx.x % WARP_DIM;
-    T* const g_input_block = g_input + BLOCK_DIM * block_idx;
-    T* g_output_block = g_output + BLOCK_DIM * block_idx;
+    if (blockDim.x != BLOCK_DIM) {
+        return;
+    }
+    constexpr uint32_t BLOCK_ELEMS = BLOCK_DIM * ELEMS_PER_THREAD;
+    T* const g_input_block = g_input + BLOCK_ELEMS * block_idx;
+    T* g_output_block = g_output + BLOCK_ELEMS * block_idx;
     
     // Registers
     T r_elements[ELEMS_PER_THREAD];
@@ -101,12 +103,13 @@ __global__ void scan_kernel(
     __shared__ alignas(128) T s_elements[ELEMS_PER_THREAD * BLOCK_DIM];
     __shared__ alignas(128) T s_prefix_sum_buf0[BLOCK_DIM];
     __shared__ alignas(128) T s_prefix_sum_buf1[BLOCK_DIM];
+    __shared__ alignas(128) T s_block_offset;
     T* inBuf = s_prefix_sum_buf0;
     T* outBuf = s_prefix_sum_buf1;
 
     // GMEM -> SMEM, elements
     // TODO: GMEM Latency is exposed here. STAGES??
-    for (uint32_t eidx = tidx; eidx < (ELEMS_PER_THREAD * BLOCK_DIM); eidx += WARP_DIM) {
+    for (uint32_t eidx = tidx; eidx < BLOCK_ELEMS; eidx += BLOCK_DIM) {
         // vectorized across warp
         s_elements[eidx] = g_input_block[eidx];
     }
@@ -130,15 +133,13 @@ __global__ void scan_kernel(
     // By unrolling this loop separately, the scheduler can burst these loads.
 #pragma unroll
     for (uint32_t eidx = 0; eidx < ELEMS_PER_THREAD; ++eidx) {
-        r_elements[eidx] = s_elements[tidx + eidx * BLOCK_DIM];
+        r_elements[eidx] = s_elements[tidx * ELEMS_PER_THREAD + eidx];
     }
 
     // Perform the local prefix sum in registers
-    r_prefix_sum = r_elements[0];
 #pragma unroll
-    for(uint32_t eidx = 1; eidx < ELEMS_PER_THREAD; eidx += 1) {
+    for(uint32_t eidx = 1; eidx < ELEMS_PER_THREAD; ++eidx) {
         r_elements[eidx] += r_elements[eidx - 1];
-        r_prefix_sum += r_elements[eidx];
     }
     inBuf[tidx] = r_elements[ELEMS_PER_THREAD - 1];
     __syncthreads(); // thread-local scan complete
@@ -146,54 +147,55 @@ __global__ void scan_kernel(
     // Kogge-Stone Reduction Tree across threads
     // TODO SMEM Latency is exposed here.
     // BLOCK_DIM >= 64 to hide SMEM latency!
-    for(uint32_t stride = 1; stride <= BLOCK_DIM/2; stride *= 2) {
+    for(uint32_t stride = 1; stride < BLOCK_DIM; stride *= 2) {
         // Predicated loads and stores
-        if (lane_idx - stride >= 0) {
+        if (tidx >= stride) {
             outBuf[tidx] = inBuf[tidx] + inBuf[tidx - stride];
+        } else {
+            outBuf[tidx] = inBuf[tidx];
         }
+        __syncthreads();
         // toggle ping and pong buffers
         T* temp = outBuf;
         outBuf = inBuf;
         inBuf = temp;
     }
-    __syncthreads(); // prefix-sum-scan complete
 
     // Final Reduction for each thread's elements
 
-    // Step1. One thread will spin-lock till previous block's sum is ready
-    // spin-lock for this block on previous block's value
-    T prev_block_sum;
-    if ((tidx == BLOCK_DIM - 1) && (block_idx > 0)) {
-        while(atomicAdd(&g_block_ready[block_idx - 1], 0) == 0) {
+    // Step1. One thread waits until the previous block's cumulative sum is ready,
+    // then publishes that scalar through shared memory.
+    if (tidx == 0) {
+        s_block_offset = 0;
+        if (block_idx > 0) {
+            while(!g_block_ready[block_idx - 1]) {
+            }
+            s_block_offset = g_prefix_sum[block_idx - 1];
         }
-        prev_block_sum = g_prefix_sum[block_idx - 1];
-    }
-    __syncwarp();
-
-    // Step2. That thread will progate sum to each thread in warp and then block (SMEM)
-    if (widx == NUM_WARPS - 1) {
-        prev_block_sum = __shfl_sync(prev_block_sum, 0);
-        // all threads in last warp have prev_block_sum
-        for (uint32_t warp = 0; warp < NUM_WARPS - 1; warp++) {
-            inBuf[warp * WARP_DIM + lane_idx] = prev_block_sum;
-        }
+        g_prefix_sum[block_idx] = s_block_offset + inBuf[BLOCK_DIM - 1];
+        // Make the cumulative sum visible before the ready flag is observed.
+        __threadfence();
+        g_block_ready[block_idx] = true;
     }
     __syncthreads(); // All threads have arrived, now we can broadcast-add
 
-    // Step3. Each thread will load it's prefix_sum(coalesced)
-    // TODO: SMEM Latency is exposed here. STAGES??
-    r_prefix_sum = inBuf[tidx];
-    for (uint32_t eidx = 0; eidx < ELEMS_PER_THREAD; eidx += 1) {
+    // Step2. Add previous-block and previous-thread offsets to local values.
+    r_prefix_sum = s_block_offset;
+    if (tidx > 0) {
+        r_prefix_sum += inBuf[tidx - 1];
+    }
+#pragma unroll
+    for (uint32_t eidx = 0; eidx < ELEMS_PER_THREAD; ++eidx) {
         r_elements[eidx] += r_prefix_sum;
     }
-    // only tidx == BLOCK_DIM - 1 has final sum
-    r_prefix_sum += r_elements[ELEMS_PER_THREAD - 1];
 
-    // TODO: This is an uncoalesced RMW, but only 1.
-    if (tidx == BLOCK_DIM - 1) {
-        g_prefix_sum[block_idx] = r_prefix_sum;
-        // the above write needs to be complete before spin-lock breaks
-        __fence__();
-        atomicAdd(&g_block_ready[block_idx], 1);
+    // Step3. Stage results back to SMEM, then write out coalesced.
+#pragma unroll
+    for (uint32_t eidx = 0; eidx < ELEMS_PER_THREAD; ++eidx) {
+        s_elements[tidx * ELEMS_PER_THREAD + eidx] = r_elements[eidx];
+    }
+    __syncthreads();
+    for (uint32_t eidx = tidx; eidx < BLOCK_ELEMS; eidx += BLOCK_DIM) {
+        g_output_block[eidx] = s_elements[eidx];
     }
 }
