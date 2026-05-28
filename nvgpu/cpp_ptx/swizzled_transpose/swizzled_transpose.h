@@ -37,6 +37,15 @@ address = | ---------------------------------- <--- B-bits ----> ------------| (
    mask = | -------- <--- B-bits ----> ------- <--- B-bits ----> ------------| (XORed with mask)
           | -------------------------< ----- SShift ---------- ><---MBase--->|
 
+static constexpr uint32_t kBitMask = (uint32_t{1} << B) - 1u;
+
+CUTE_HOST_DEVICE static constexpr uint32_t apply(uint32_t smem_offset_bytes)
+{
+    uint32_t const shifted_bits =
+        (smem_offset_bytes >> (M + S)) & kBitMask;
+    return smem_offset_bytes ^ (shifted_bits << M);
+}
+
 Addresses at 4B per lane (M=2):
 
 --- Row0 ---
