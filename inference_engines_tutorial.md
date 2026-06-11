@@ -2014,6 +2014,73 @@ fast trace: scheduler plan -> KV allocation -> batch -> execute -> update
 If both traces are clear, most design and debugging questions become local:
 you can identify the owner, resource, queue, transition, and metric involved.
 
+## 24.s1 More notes on KV Cache Organization in a Model+Engine Replica
+
+### The Core Concept: GPU-First Architecture
+
+In high-performance inference, **GPU VRAM is the primary, high-bandwidth heap for the KV cache.**
+
+Because modern LLMs are overwhelmingly memory-bandwidth bound during the decode (autoregressive) phase, every single token generation requires fetching the existing KV cache from memory. The bidirectional bandwidth of even the fastest PCIe Gen5 or specialized CPU-to-GPU interconnects is an absolute bottleneck compared to on-device HBM (High Bandwidth Memory).
+
+If an engine had to constantly page blocks in from CPU RAM during a normal decode iteration, token generation speeds would plummet by an order of magnitude. Therefore, the architecture behaves under these rules:
+
+* **The Bound is GPU HBM:** The maximum amount of *actively executing* KV cache is strictly bounded by the free HBM available across the replica's GPUs after the model weights are loaded.
+* **CPU RAM is an Overflow Valve (or Optimizer):** CPU RAM is not the primary storage for active sequences. Instead, it acts as a **swap space** for preempted requests or a **warm tier** for an evictable prefix cache.
+
+---
+
+### Sizing the Dynamic Heap on a GPU Replica
+
+To understand exactly how much KV cache capacity a replica has, you can calculate it using a simple structural breakdown.
+
+#### 1. The Static vs. Dynamic Split
+
+When a model replica initializes across a group of GPUs (whether utilizing Tensor Parallelism, Pipeline Parallelism, or both), the total HBM is divided:
+
+$$\text{Total HBM} = \text{Model Weights} + \text{Static Workspaces (CUDA Graphs, etc.)} + \text{The KV Cache Pool}$$
+
+The engine pre-allocates virtually all remaining HBM into a contiguous **Paged KV Cache Pool**, dividing it into fixed-size physical blocks (typically 16 or 32 tokens per block).
+
+#### 2. The Multi-GPU Scaling Math
+
+The total KV cache capacity scales with the number of partitioned heads across your distributed fabric. For a standard transformer model, the exact footprint of **one token's KV cache across the entire replica** is calculated as:
+
+$$\text{Bytes per Token} = 2 \times \text{Number of Layers} \times \text{Number of KV Heads} \times \text{Head Dimension} \times \text{Bytes per Element}$$
+
+> **Note on Architectures:** Modern optimization techniques directly shrink this per-token footprint. Grouped-Query Attention (GQA) or Multi-Query Attention (MQA) drastically reduce the `Number of KV Heads`, while FP8 or FP4 quantization reduces the `Bytes per Element`.
+
+If your replica consists of 8 GPUs mapped via Tensor Parallelism, the model weights are split across them, but the total *effective* KV cache capacity is the sum of the KV block pools across all 8 devices.
+
+---
+
+### How CPU RAM Actually Fits In
+
+So, if the max active footprint is bounded by GPU HBM, what happens when you run out of blocks, and where does that terabyte-scale CPU RAM come into play?
+
+In production engines, CPU memory serves two primary roles:
+
+##### Preemption via Swapping
+
+When the arrival rate of prompts spikes (surpassing what the GPU HBM can hold), the engine's scheduler faces an allocation crisis. To avoid crashing or dropping requests, it **preempts** lower-priority running sequences.
+Instead of discarding their computed KV history entirely (which would require an expensive recomputation step later), the engine asynchronously pages those logical blocks out from **GPU HBM $\rightarrow$ CPU RAM**. When slot capacity frees up on the GPU, they are paged back in.
+
+##### Warm Prefix Caching
+
+If your application features long, highly repeatable system prompts, multi-turn chat transcripts, or massive context documents, the engine will hash these token sequences.
+
+* **Active Cache:** Live blocks sit in GPU HBM.
+* **Idle/Shared Cache:** When a request finishes, its blocks aren't immediately zeroed. They are held in a virtual cache pool. If GPU memory pressure mounts, the engine evicts these unreferenced blocks to CPU RAM, maintaining a much larger "warm" dictionary of document contexts.
+
+---
+
+### Summary Mental Model
+
+| Attribute | GPU HBM Pool (The Hot Heap) | CPU RAM Pool (The Swap/Cache Tier) |
+| --- | --- | --- |
+| **Role** | Primary execution memory for all **actively scheduled** iterations. | Overflow valve for **preempted** tasks and a long-term **prefix optimization** store. |
+| **Performance Impact** | Runs at terabytes-per-second memory bandwidth; essential for low token latency. | Limited by PCIe/interconnect speeds; used to prevent catastrophic capacity failures. |
+| **Hard Limit** | Bounces requests or triggers preemption if this fills up with *active* sequences. | Can scale to terabytes to hold thousands of dormant, cached, or paused user contexts. |
+
 ## 25. References to concrete engines
 
 - [vLLM architecture overview](https://docs.vllm.ai/en/latest/design/arch_overview/):
