@@ -2014,7 +2014,7 @@ fast trace: scheduler plan -> KV allocation -> batch -> execute -> update
 If both traces are clear, most design and debugging questions become local:
 you can identify the owner, resource, queue, transition, and metric involved.
 
-## 24.s1 More notes on KV Cache Organization in a Model+Engine Replica
+## Appendix.a More notes on KV Cache Organization in a Model+Engine Replica
 
 ### The Core Concept: GPU-First Architecture
 
@@ -2081,7 +2081,7 @@ If your application features long, highly repeatable system prompts, multi-turn 
 | **Performance Impact** | Runs at terabytes-per-second memory bandwidth; essential for low token latency. | Limited by PCIe/interconnect speeds; used to prevent catastrophic capacity failures. |
 | **Hard Limit** | Bounces requests or triggers preemption if this fills up with *active* sequences. | Can scale to terabytes to hold thousands of dormant, cached, or paused user contexts. |
 
-## 25. References to concrete engines
+## References to concrete engines
 
 - [vLLM architecture overview](https://docs.vllm.ai/en/latest/design/arch_overview/):
   separates API servers, an engine core responsible for scheduling and KV
