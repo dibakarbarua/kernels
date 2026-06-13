@@ -13,6 +13,8 @@ The model forward pass is important, but it is only one block. A production
 system must also control admission, queueing, memory, fairness, cancellation,
 streaming, failures, and observability.
 
+A thorough treatment has been done by Aleksa Gordic at https://www.aleksagordic.com/blog/vllm
+
 ## 1. The system at three scales
 
 It helps to reason about three nested scales.
