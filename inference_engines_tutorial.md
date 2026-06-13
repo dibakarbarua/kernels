@@ -461,6 +461,7 @@ The second operation happens inside the model on the accelerator:
 
 ```python
 hidden_0 = embedding_weight[input_token_ids]
+```
 
 After the final lower though, we cannot do a look-up as the generated tokens [B, D] for each batch,
 are not necessarily exactly equal to the vocabulary dimensions. Since both vectors are normalized to 1,
@@ -482,7 +483,6 @@ we can find cosine similarity using dot product and also express this as a high-
    - \(S_3 = \vec{v} \cdot V_3\)
    - \(S_4 = \vec{v} \cdot V_4\)
 - Whichever \(S\) is the largest reveals the closest match.
-```
 
 That is generally a gather from the embedding table, not a GEMM either. The
 later transformer projections are GEMMs.
