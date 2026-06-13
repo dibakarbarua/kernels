@@ -461,6 +461,27 @@ The second operation happens inside the model on the accelerator:
 
 ```python
 hidden_0 = embedding_weight[input_token_ids]
+
+After the final lower though, we cannot do a look-up as the generated tokens [B, D] for each batch,
+are not necessarily exactly equal to the vocabulary dimensions. Since both vectors are normalized to 1,
+we can find cosine similarity using dot product and also express this as a high-throughput GEMM.
+
+##### The Mathematical Reason
+- When vectors are normalized (magnitude of 1), the dot product evaluates directly to the cosine of the angle between them:\(\cos(0^{\circ}) = 1\):
+   Identical vectors point in the exact same direction.\(\cos(90^{\circ}) = 0\):
+- Perpendicular vectors have no correlation.\(\cos(180^{\circ}) = -1\):
+   Completely opposite vectors.
+
+##### Step-by-Step Approach
+- Compute Candidate Scores: Take your vector (\(\vec{v}\)) and perform a dot product with Candidate 1 (\(V_{1}\)), Candidate 2 (\(V_{2}\)), Candidate 3 (\(V_{3}\)), and Candidate 4 (\(V_{4}\)).
+- Find the Maximum Value: Identify which of the 4 scalar results is the highest (closest to 1.0).
+   - Example FormulaFor any two normalized vectors \(\vec{A}\) and \(\vec{B}\), each of size \(D\):\(\vec{A}\cdot \vec{B}=\sum _{i=1}^{D}A_{i}\times B_{i}\)
+- You would run this sum for all 4 pairs:
+   - \(S_1 = \vec{v} \cdot V_1\)
+   - \(S_2 = \vec{v} \cdot V_2\)
+   - \(S_3 = \vec{v} \cdot V_3\)
+   - \(S_4 = \vec{v} \cdot V_4\)
+- Whichever \(S\) is the largest reveals the closest match.
 ```
 
 That is generally a gather from the embedding table, not a GEMM either. The
