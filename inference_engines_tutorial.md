@@ -275,7 +275,7 @@ class GenerationParameters:
     stop_token_ids: frozenset[TokenId]
     stop_strings: tuple[str, ...]
     seed: int | None
-    return_logprobs: bool = False
+    return_logprobs: bool = False # log-probability allows lower precision stores (exp(-x) will require more precision)
 
 
 @dataclass(frozen=True)
