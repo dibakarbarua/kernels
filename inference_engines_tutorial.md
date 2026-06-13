@@ -1351,6 +1351,22 @@ Transient memory is governed by the scheduler's current token budget and
 batch composition. It is more accurate to attribute it to an iteration than
 to one request, although large prefill chunks clearly contribute more of it.
 
+### Deterministic KV Cache Addressing
+
+1. The Pre-allocated Tensor Structure (No Cross-Layer Interference)
+
+When the engine says it "allocates and reshapes" the KV cache at startup, it allocates a giant, static tensor per layer, or it structures a single giant tensor where the Layer dimension is the outermost dimension (or heavily strided).Think of the allocation not as a chaotic pile of blocks, but as a fixed, multi-dimensional grid. A typical allocation layout for the entire global KV block pool looks like this:$$\text{Shape} = (\text{num\_layers}, \text{num\_blocks}, \text{num\_kv\_heads}, \text{block\_size}, \text{head\_size})$$Because this tensor is allocated statically at startup, the memory offset between Layer 0 and Layer 1 is completely fixed and constant.If you want to access Layer $L$, Block $B$, Head $H$, the hardware knows exactly how many bytes to skip using fixed pointer arithmetic (strides), completely independent of how long individual user requests are.Layer 1's physical memory space never expands into Layer 2's space. They are completely sandboxed from each other from day one.
+
+2. Enter the Block Table (The Layer-Insensitive Map)
+
+Won't an attention layer need to know how many blocks to read for each batch item? Yes, absolutely. But it does not find this out by tracing a contiguous memory stream. It finds out through a host-side metadata structure called the Block Table (passed to the GPU kernel as a 2D tensor of integers).When a batch of requests is scheduled, the engine builds a small metadata batch descriptor for the CUDA kernel:input_tokens: The actual token IDs for this step.block_table: A 2D array of shape (batch_size, max_num_blocks_per_seq).sequence_lengths: An array of integers representing the exact history length of each batch item.Request A (Length: 34 tokens) ──> Needs 3 blocks ──> Block Table Row: [Idx 42, Idx 99, Idx 105]
+Request B (Length: 12 tokens) ──> Needs 1 block  ──> Block Table Row: [Idx 12, Idx  0, Idx   0]
+
+
+3. Execution Inside the Custom GPU Kernel
+
+When the custom FlashAttention or PagedAttention kernel fires for a specific layer (let's say Layer 5), here is exactly how the threads resolve those addresses deterministically:Thread Identification: A GPU thread block looks at which batch item it is processing (e.g., batch_item_idx = 1 for Request B).Lookup History Size: It reads sequence_lengths[1] to know it only needs to fetch 12 tokens worth of history. Since each block holds 16 tokens, it knows it only needs to look at the 1st block assigned to this request.Fetch the Physical Block Pointer: It looks at block_table[1][0] and pulls out the integer index (e.g., Physical Block Idx 12).Deterministic Pointer Arithmetic: Now the kernel calculates the exact hardware address using fixed strides determined at startup:$$\text{Address} = \text{Base\_Pointer} + (5 \times \text{layer\_stride}) + (12 \times \text{block\_stride}) + \dots$$
+
 ### CPU/GPU transfer timeline
 
 Here is a conventional end-to-end data path:
