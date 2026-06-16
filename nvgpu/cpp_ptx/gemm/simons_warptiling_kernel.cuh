@@ -10,6 +10,8 @@
 #define CEIL_DIV(M, N) (((M) + (N)-1) / (N))
 const int WARPSIZE = 32; // warpSize is not constexpr
 
+// https://siboehm.com/articles/22/CUDA-MMM
+
 namespace wt {
 template <const int BM, const int BN, const int BK, const int rowStrideA,
           const int rowStrideB>

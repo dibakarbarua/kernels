@@ -13,6 +13,8 @@ The model forward pass is important, but it is only one block. A production
 system must also control admission, queueing, memory, fairness, cancellation,
 streaming, failures, and observability.
 
+A thorough treatment has been done by Aleksa Gordic at https://www.aleksagordic.com/blog/vllm
+
 ## 1. The system at three scales
 
 It helps to reason about three nested scales.
@@ -275,7 +277,7 @@ class GenerationParameters:
     stop_token_ids: frozenset[TokenId]
     stop_strings: tuple[str, ...]
     seed: int | None
-    return_logprobs: bool = False
+    return_logprobs: bool = False # log-probability allows lower precision stores (exp(-x) will require more precision)
 
 
 @dataclass(frozen=True)
@@ -460,6 +462,27 @@ The second operation happens inside the model on the accelerator:
 ```python
 hidden_0 = embedding_weight[input_token_ids]
 ```
+
+After the final lower though, we cannot do a look-up as the generated tokens [B, D] for each batch,
+are not necessarily exactly equal to the vocabulary dimensions. Since both vectors are normalized to 1,
+we can find cosine similarity using dot product and also express this as a high-throughput GEMM.
+
+##### The Mathematical Reason
+- When vectors are normalized (magnitude of 1), the dot product evaluates directly to the cosine of the angle between them:\(\cos(0^{\circ}) = 1\):
+   Identical vectors point in the exact same direction.\(\cos(90^{\circ}) = 0\):
+- Perpendicular vectors have no correlation.\(\cos(180^{\circ}) = -1\):
+   Completely opposite vectors.
+
+##### Step-by-Step Approach
+- Compute Candidate Scores: Take your vector (\(\vec{v}\)) and perform a dot product with Candidate 1 (\(V_{1}\)), Candidate 2 (\(V_{2}\)), Candidate 3 (\(V_{3}\)), and Candidate 4 (\(V_{4}\)).
+- Find the Maximum Value: Identify which of the 4 scalar results is the highest (closest to 1.0).
+   - Example FormulaFor any two normalized vectors \(\vec{A}\) and \(\vec{B}\), each of size \(D\):\(\vec{A}\cdot \vec{B}=\sum _{i=1}^{D}A_{i}\times B_{i}\)
+- You would run this sum for all 4 pairs:
+   - \(S_1 = \vec{v} \cdot V_1\)
+   - \(S_2 = \vec{v} \cdot V_2\)
+   - \(S_3 = \vec{v} \cdot V_3\)
+   - \(S_4 = \vec{v} \cdot V_4\)
+- Whichever \(S\) is the largest reveals the closest match.
 
 That is generally a gather from the embedding table, not a GEMM either. The
 later transformer projections are GEMMs.
@@ -1328,6 +1351,22 @@ Transient memory is governed by the scheduler's current token budget and
 batch composition. It is more accurate to attribute it to an iteration than
 to one request, although large prefill chunks clearly contribute more of it.
 
+### Deterministic KV Cache Addressing
+
+1. The Pre-allocated Tensor Structure (No Cross-Layer Interference)
+
+When the engine says it "allocates and reshapes" the KV cache at startup, it allocates a giant, static tensor per layer, or it structures a single giant tensor where the Layer dimension is the outermost dimension (or heavily strided).Think of the allocation not as a chaotic pile of blocks, but as a fixed, multi-dimensional grid. A typical allocation layout for the entire global KV block pool looks like this:$$\text{Shape} = (\text{num\_layers}, \text{num\_blocks}, \text{num\_kv\_heads}, \text{block\_size}, \text{head\_size})$$Because this tensor is allocated statically at startup, the memory offset between Layer 0 and Layer 1 is completely fixed and constant.If you want to access Layer $L$, Block $B$, Head $H$, the hardware knows exactly how many bytes to skip using fixed pointer arithmetic (strides), completely independent of how long individual user requests are.Layer 1's physical memory space never expands into Layer 2's space. They are completely sandboxed from each other from day one.
+
+2. Enter the Block Table (The Layer-Insensitive Map)
+
+Won't an attention layer need to know how many blocks to read for each batch item? Yes, absolutely. But it does not find this out by tracing a contiguous memory stream. It finds out through a host-side metadata structure called the Block Table (passed to the GPU kernel as a 2D tensor of integers).When a batch of requests is scheduled, the engine builds a small metadata batch descriptor for the CUDA kernel:input_tokens: The actual token IDs for this step.block_table: A 2D array of shape (batch_size, max_num_blocks_per_seq).sequence_lengths: An array of integers representing the exact history length of each batch item.Request A (Length: 34 tokens) ──> Needs 3 blocks ──> Block Table Row: [Idx 42, Idx 99, Idx 105]
+Request B (Length: 12 tokens) ──> Needs 1 block  ──> Block Table Row: [Idx 12, Idx  0, Idx   0]
+
+
+3. Execution Inside the Custom GPU Kernel
+
+When the custom FlashAttention or PagedAttention kernel fires for a specific layer (let's say Layer 5), here is exactly how the threads resolve those addresses deterministically:Thread Identification: A GPU thread block looks at which batch item it is processing (e.g., batch_item_idx = 1 for Request B).Lookup History Size: It reads sequence_lengths[1] to know it only needs to fetch 12 tokens worth of history. Since each block holds 16 tokens, it knows it only needs to look at the 1st block assigned to this request.Fetch the Physical Block Pointer: It looks at block_table[1][0] and pulls out the integer index (e.g., Physical Block Idx 12).Deterministic Pointer Arithmetic: Now the kernel calculates the exact hardware address using fixed strides determined at startup:$$\text{Address} = \text{Base\_Pointer} + (5 \times \text{layer\_stride}) + (12 \times \text{block\_stride}) + \dots$$
+
 ### CPU/GPU transfer timeline
 
 Here is a conventional end-to-end data path:
@@ -2014,7 +2053,74 @@ fast trace: scheduler plan -> KV allocation -> batch -> execute -> update
 If both traces are clear, most design and debugging questions become local:
 you can identify the owner, resource, queue, transition, and metric involved.
 
-## 25. References to concrete engines
+## Appendix.a More notes on KV Cache Organization in a Model+Engine Replica
+
+### The Core Concept: GPU-First Architecture
+
+In high-performance inference, **GPU VRAM is the primary, high-bandwidth heap for the KV cache.**
+
+Because modern LLMs are overwhelmingly memory-bandwidth bound during the decode (autoregressive) phase, every single token generation requires fetching the existing KV cache from memory. The bidirectional bandwidth of even the fastest PCIe Gen5 or specialized CPU-to-GPU interconnects is an absolute bottleneck compared to on-device HBM (High Bandwidth Memory).
+
+If an engine had to constantly page blocks in from CPU RAM during a normal decode iteration, token generation speeds would plummet by an order of magnitude. Therefore, the architecture behaves under these rules:
+
+* **The Bound is GPU HBM:** The maximum amount of *actively executing* KV cache is strictly bounded by the free HBM available across the replica's GPUs after the model weights are loaded.
+* **CPU RAM is an Overflow Valve (or Optimizer):** CPU RAM is not the primary storage for active sequences. Instead, it acts as a **swap space** for preempted requests or a **warm tier** for an evictable prefix cache.
+
+---
+
+### Sizing the Dynamic Heap on a GPU Replica
+
+To understand exactly how much KV cache capacity a replica has, you can calculate it using a simple structural breakdown.
+
+#### 1. The Static vs. Dynamic Split
+
+When a model replica initializes across a group of GPUs (whether utilizing Tensor Parallelism, Pipeline Parallelism, or both), the total HBM is divided:
+
+$$\text{Total HBM} = \text{Model Weights} + \text{Static Workspaces (CUDA Graphs, etc.)} + \text{The KV Cache Pool}$$
+
+The engine pre-allocates virtually all remaining HBM into a contiguous **Paged KV Cache Pool**, dividing it into fixed-size physical blocks (typically 16 or 32 tokens per block).
+
+#### 2. The Multi-GPU Scaling Math
+
+The total KV cache capacity scales with the number of partitioned heads across your distributed fabric. For a standard transformer model, the exact footprint of **one token's KV cache across the entire replica** is calculated as:
+
+$$\text{Bytes per Token} = 2 \times \text{Number of Layers} \times \text{Number of KV Heads} \times \text{Head Dimension} \times \text{Bytes per Element}$$
+
+> **Note on Architectures:** Modern optimization techniques directly shrink this per-token footprint. Grouped-Query Attention (GQA) or Multi-Query Attention (MQA) drastically reduce the `Number of KV Heads`, while FP8 or FP4 quantization reduces the `Bytes per Element`.
+
+If your replica consists of 8 GPUs mapped via Tensor Parallelism, the model weights are split across them, but the total *effective* KV cache capacity is the sum of the KV block pools across all 8 devices.
+
+---
+
+### How CPU RAM Actually Fits In
+
+So, if the max active footprint is bounded by GPU HBM, what happens when you run out of blocks, and where does that terabyte-scale CPU RAM come into play?
+
+In production engines, CPU memory serves two primary roles:
+
+##### Preemption via Swapping
+
+When the arrival rate of prompts spikes (surpassing what the GPU HBM can hold), the engine's scheduler faces an allocation crisis. To avoid crashing or dropping requests, it **preempts** lower-priority running sequences.
+Instead of discarding their computed KV history entirely (which would require an expensive recomputation step later), the engine asynchronously pages those logical blocks out from **GPU HBM $\rightarrow$ CPU RAM**. When slot capacity frees up on the GPU, they are paged back in.
+
+##### Warm Prefix Caching
+
+If your application features long, highly repeatable system prompts, multi-turn chat transcripts, or massive context documents, the engine will hash these token sequences.
+
+* **Active Cache:** Live blocks sit in GPU HBM.
+* **Idle/Shared Cache:** When a request finishes, its blocks aren't immediately zeroed. They are held in a virtual cache pool. If GPU memory pressure mounts, the engine evicts these unreferenced blocks to CPU RAM, maintaining a much larger "warm" dictionary of document contexts.
+
+---
+
+### Summary Mental Model
+
+| Attribute | GPU HBM Pool (The Hot Heap) | CPU RAM Pool (The Swap/Cache Tier) |
+| --- | --- | --- |
+| **Role** | Primary execution memory for all **actively scheduled** iterations. | Overflow valve for **preempted** tasks and a long-term **prefix optimization** store. |
+| **Performance Impact** | Runs at terabytes-per-second memory bandwidth; essential for low token latency. | Limited by PCIe/interconnect speeds; used to prevent catastrophic capacity failures. |
+| **Hard Limit** | Bounces requests or triggers preemption if this fills up with *active* sequences. | Can scale to terabytes to hold thousands of dormant, cached, or paused user contexts. |
+
+## References to concrete engines
 
 - [vLLM architecture overview](https://docs.vllm.ai/en/latest/design/arch_overview/):
   separates API servers, an engine core responsible for scheduling and KV
